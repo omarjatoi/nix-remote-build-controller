@@ -3,6 +3,7 @@ package v1alpha1
 import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 // NixBuildRequest represents a request for a Nix build that needs a dedicated builder pod
@@ -26,7 +27,7 @@ type NixBuildRequestSpec struct {
 	Image string `json:"image,omitempty"`
 
 	// Timeout for the build in seconds (default: 3600)
-	TimeoutSeconds *int32 `json:"timeoutSeconds,omitempty"`
+	TimeoutSeconds *int64 `json:"timeoutSeconds,omitempty"`
 
 	// NodeSelector for pod placement
 	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
@@ -103,4 +104,108 @@ type NixBuildRequestList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []NixBuildRequest `json:"items"`
+}
+
+// DeepCopyInto copies all properties of this object into another object of the
+// same type that is passed as a pointer.
+func (in *NixBuildRequest) DeepCopyInto(out *NixBuildRequest) {
+	*out = *in
+	out.TypeMeta = in.TypeMeta
+	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
+	in.Spec.DeepCopyInto(&out.Spec)
+	in.Status.DeepCopyInto(&out.Status)
+}
+
+// DeepCopy copies the receiver, creating a new NixBuildRequest.
+func (in *NixBuildRequest) DeepCopy() *NixBuildRequest {
+	if in == nil {
+		return nil
+	}
+	out := new(NixBuildRequest)
+	in.DeepCopyInto(out)
+	return out
+}
+
+// DeepCopyObject copies the receiver, creating a new runtime.Object.
+func (in *NixBuildRequest) DeepCopyObject() runtime.Object {
+	if c := in.DeepCopy(); c != nil {
+		return c
+	}
+	return nil
+}
+
+// DeepCopyInto copies all properties of this object into another object of the
+// same type that is passed as a pointer.
+func (in *NixBuildRequestList) DeepCopyInto(out *NixBuildRequestList) {
+	*out = *in
+	out.TypeMeta = in.TypeMeta
+	in.ListMeta.DeepCopyInto(&out.ListMeta)
+	if in.Items != nil {
+		in, out := &in.Items, &out.Items
+		*out = make([]NixBuildRequest, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
+	}
+}
+
+// DeepCopy copies the receiver, creating a new NixBuildRequestList.
+func (in *NixBuildRequestList) DeepCopy() *NixBuildRequestList {
+	if in == nil {
+		return nil
+	}
+	out := new(NixBuildRequestList)
+	in.DeepCopyInto(out)
+	return out
+}
+
+// DeepCopyObject copies the receiver, creating a new runtime.Object.
+func (in *NixBuildRequestList) DeepCopyObject() runtime.Object {
+	if c := in.DeepCopy(); c != nil {
+		return c
+	}
+	return nil
+}
+
+// Spec and Status DeepCopy methods would normally be generated
+// For now, simple implementations:
+func (in *NixBuildRequestSpec) DeepCopyInto(out *NixBuildRequestSpec) {
+	*out = *in
+	in.Resources.DeepCopyInto(&out.Resources)
+	if in.TimeoutSeconds != nil {
+		in, out := &in.TimeoutSeconds, &out.TimeoutSeconds
+		*out = new(int64)
+		**out = **in
+	}
+	if in.NodeSelector != nil {
+		in, out := &in.NodeSelector, &out.NodeSelector
+		*out = make(map[string]string, len(*in))
+		for key, val := range *in {
+			(*out)[key] = val
+		}
+	}
+}
+
+func (in *NixBuildRequestStatus) DeepCopyInto(out *NixBuildRequestStatus) {
+	*out = *in
+	if in.StartTime != nil {
+		in, out := &in.StartTime, &out.StartTime
+		*out = (*in).DeepCopy()
+	}
+	if in.CompletionTime != nil {
+		in, out := &in.CompletionTime, &out.CompletionTime
+		*out = (*in).DeepCopy()
+	}
+	if in.Conditions != nil {
+		in, out := &in.Conditions, &out.Conditions
+		*out = make([]BuildCondition, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
+	}
+}
+
+func (in *BuildCondition) DeepCopyInto(out *BuildCondition) {
+	*out = *in
+	in.LastTransitionTime.DeepCopyInto(&out.LastTransitionTime)
 }

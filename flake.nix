@@ -24,7 +24,7 @@
             pname = "controller";
             inherit version;
             src = ./.;
-            vendorHash = "sha256-cbd/DtpDh/1Wi1zLkOzLBfT2zX3piIw4j/mBcNA0QnE=";
+            vendorHash = "sha256-Ua6i6574AG84UsyAIj/KL5yc0+4BVVy1eR+N98qpUkQ=";
             subPackages = [ "cmd/controller" ];
             ldflags = [
               "-s"
@@ -37,7 +37,7 @@
             pname = "proxy";
             inherit version;
             src = ./.;
-            vendorHash = "sha256-QJqI7pSmljWmCBwC4EeyuZf1hyGz66MUHQDw4mWPY70=";
+            vendorHash = "sha256-Ua6i6574AG84UsyAIj/KL5yc0+4BVVy1eR+N98qpUkQ=";
             subPackages = [ "cmd/proxy" ];
             ldflags = [
               "-s"

@@ -16,6 +16,8 @@ var version = "dev"
 var port int
 var hostKeyPath string
 var namespace string
+var remoteUser string
+var remotePort int32
 
 var rootCmd = &cobra.Command{
 	Use:   "proxy",
@@ -26,7 +28,7 @@ var rootCmd = &cobra.Command{
 		defer cancel()
 
 		addr := fmt.Sprintf(":%d", port)
-		sshProxy, err := proxy.NewSSHProxy(addr, hostKeyPath, namespace)
+		sshProxy, err := proxy.NewSSHProxy(addr, hostKeyPath, namespace, remoteUser, remotePort)
 		if err != nil {
 			log.Fatal().Err(err).Msg("Failed to create SSH proxy")
 		}
@@ -50,6 +52,8 @@ func init() {
 	rootCmd.Flags().IntVarP(&port, "port", "p", 2222, "SSH proxy server port")
 	rootCmd.Flags().StringVarP(&hostKeyPath, "host-key", "k", "", "Path to provided SSH host private key file")
 	rootCmd.Flags().StringVarP(&namespace, "namespace", "n", "default", "Kubernetes namespace for build requests")
+	rootCmd.Flags().StringVarP(&remoteUser, "remote-user", "u", "root", "SSH username for builder pods")
+	rootCmd.Flags().Int32VarP(&remotePort, "remote-port", "r", 22, "SSH port on builder pods")
 	rootCmd.AddCommand(versionCmd)
 }
 

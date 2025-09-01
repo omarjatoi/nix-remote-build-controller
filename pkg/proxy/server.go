@@ -19,7 +19,6 @@ import (
 	"golang.org/x/crypto/ssh"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/watch"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
@@ -35,6 +34,8 @@ type SSHProxy struct {
 	shutdownOnce sync.Once
 	k8sClient    client.Client
 	namespace    string
+	remoteUser   string
+	remotePort   int32
 }
 
 type ProxySession struct {
@@ -52,7 +53,7 @@ const (
 	SessionClosed
 )
 
-func NewSSHProxy(addr, hostKeyPath, namespace string) (*SSHProxy, error) {
+func NewSSHProxy(addr, hostKeyPath, namespace, remoteUser string, remotePort int32) (*SSHProxy, error) {
 	var hostKey ssh.Signer
 	var err error
 
@@ -84,7 +85,12 @@ func NewSSHProxy(addr, hostKeyPath, namespace string) (*SSHProxy, error) {
 		return nil, fmt.Errorf("failed to add NixBuilder scheme: %w", err)
 	}
 
-	k8sClient, err := client.New(config.GetConfigOrDie(), client.Options{
+	k8sConfig, err := config.GetConfig()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get Kubernetes config: %w", err)
+	}
+
+	k8sClient, err := client.New(k8sConfig, client.Options{
 		Scheme: scheme,
 	})
 	if err != nil {
@@ -98,6 +104,8 @@ func NewSSHProxy(addr, hostKeyPath, namespace string) (*SSHProxy, error) {
 		shutdownChan: make(chan struct{}),
 		k8sClient:    k8sClient,
 		namespace:    namespace,
+		remoteUser:   remoteUser,
+		remotePort:   remotePort,
 	}
 
 	log.Info().Str("address", addr).Msg("SSH proxy listening")
@@ -148,7 +156,7 @@ func (p *SSHProxy) Start(ctx context.Context) error {
 			p.activeConns.Add(1)
 			go func() {
 				defer p.activeConns.Done()
-				p.handleConnection(conn)
+				p.handleConnection(ctx, conn)
 			}()
 		}
 	}
@@ -183,7 +191,7 @@ func (p *SSHProxy) getActiveSessionCount() int {
 	return len(p.sessions)
 }
 
-func (p *SSHProxy) handleConnection(netConn net.Conn) {
+func (p *SSHProxy) handleConnection(ctx context.Context, netConn net.Conn) {
 	defer netConn.Close()
 
 	config := &ssh.ServerConfig{
@@ -218,11 +226,11 @@ func (p *SSHProxy) handleConnection(netConn net.Conn) {
 
 	go ssh.DiscardRequests(reqs)
 	for newChannel := range chans {
-		go p.handleChannel(session, newChannel)
+		go p.handleChannel(ctx, session, newChannel)
 	}
 }
 
-func (p *SSHProxy) handleChannel(session *ProxySession, newChannel ssh.NewChannel) {
+func (p *SSHProxy) handleChannel(ctx context.Context, session *ProxySession, newChannel ssh.NewChannel) {
 	if newChannel.ChannelType() != "session" {
 		newChannel.Reject(ssh.UnknownChannelType, "unknown channel type")
 		return
@@ -237,26 +245,99 @@ func (p *SSHProxy) handleChannel(session *ProxySession, newChannel ssh.NewChanne
 
 	log.Info().Str("session_id", session.ID).Msg("Handling SSH session channel")
 
-	for req := range requests {
-		log.Info().Str("session_id", session.ID).Str("request_type", req.Type).Msg("New SSH request")
-		switch req.Type {
-		case "exec":
-			log.Debug().Str("session_id", session.ID).Str("command", string(req.Payload)).Msg("Executing command")
-			req.Reply(false, nil)
-		case "shell":
-			log.Debug().Str("session_id", session.ID).Msg("Starting shell")
-			req.Reply(false, nil)
-		case "env":
-			log.Debug().Str("session_id", session.ID).Msg("Setting environment variables")
-			req.Reply(false, nil)
-		case "pty-req":
-			log.Debug().Str("session_id", session.ID).Msg("Requesting pseudo-terminal")
-			req.Reply(false, nil)
-		default:
-			log.Debug().Str("session_id", session.ID).Str("request_type", req.Type).Msg("Unknown SSH request")
-			req.Reply(false, nil)
+	if err := p.createBuildRequest(ctx, session); err != nil {
+		log.Error().Err(err).Str("session_id", session.ID).Msg("Failed to create build request")
+		return
+	}
+
+	podIP, err := p.waitForBuilderPod(ctx, session)
+	if err != nil {
+		log.Error().Err(err).Str("session_id", session.ID).Msg("Failed to get builder pod")
+		return
+	}
+
+	if err := p.routeToBuilder(ctx, session, channel, requests, podIP); err != nil {
+		log.Error().Err(err).Str("session_id", session.ID).Msg("Failed to route to builder")
+		return
+	}
+}
+
+func (p *SSHProxy) createBuildRequest(ctx context.Context, session *ProxySession) error {
+	buildReq := &v1alpha1.NixBuildRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      fmt.Sprintf("build-%s", session.ID),
+			Namespace: p.namespace,
+		},
+		Spec: v1alpha1.NixBuildRequestSpec{
+			SessionID: session.ID,
+		},
+	}
+
+	if err := p.k8sClient.Create(ctx, buildReq); err != nil {
+		return fmt.Errorf("failed to create NixBuildRequest: %w", err)
+	}
+
+	log.Info().Str("session_id", session.ID).Msg("Created NixBuildRequest")
+	return nil
+}
+
+func (p *SSHProxy) waitForBuilderPod(ctx context.Context, session *ProxySession) (string, error) {
+	buildReqName := fmt.Sprintf("build-%s", session.ID)
+
+	timeout := time.After(time.Minute * 2)
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-timeout:
+			return "", fmt.Errorf("timeout waiting for builder pod")
+		case <-ticker.C:
+			var buildReq v1alpha1.NixBuildRequest
+			if err := p.k8sClient.Get(ctx, client.ObjectKey{
+				Namespace: p.namespace,
+				Name:      buildReqName,
+			}, &buildReq); err != nil {
+				continue
+			}
+
+			if buildReq.Status.Phase == v1alpha1.BuildPhaseRunning && buildReq.Status.PodIP != "" {
+				log.Info().Str("session_id", session.ID).Str("pod_ip", buildReq.Status.PodIP).Msg("Builder pod ready")
+				return buildReq.Status.PodIP, nil
+			}
 		}
 	}
+}
+
+func (p *SSHProxy) routeToBuilder(ctx context.Context, session *ProxySession, channel ssh.Channel, requests <-chan *ssh.Request, podIP string) error {
+	builderAddr := fmt.Sprintf("%s:%d", podIP, p.remotePort)
+
+	builderConn, err := ssh.Dial("tcp", builderAddr, &ssh.ClientConfig{
+		User:            p.remoteUser,
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // TODO: Proper host key validation
+		Timeout:         time.Second * 10,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to connect to builder pod: %w", err)
+	}
+	defer builderConn.Close()
+
+	builderSession, err := builderConn.NewSession()
+	if err != nil {
+		return fmt.Errorf("failed to create session on builder: %w", err)
+	}
+	defer builderSession.Close()
+
+	log.Info().Str("session_id", session.ID).Str("builder_addr", builderAddr).Msg("Connected to builder pod")
+
+	for req := range requests {
+		log.Debug().Str("session_id", session.ID).Str("request_type", req.Type).Msg("Forwarding SSH request to builder")
+		req.Reply(false, nil) // TODO: Forward to builder
+	}
+
+	return nil
 }
 
 func generateHostKey() (ssh.Signer, error) {

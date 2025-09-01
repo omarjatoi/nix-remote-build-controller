@@ -39,7 +39,12 @@ var rootCmd = &cobra.Command{
 			log.Fatal().Err(err).Msg("Failed to add NixBuilder scheme")
 		}
 
-		mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+		k8sConfig, err := ctrl.GetConfig()
+		if err != nil {
+			log.Fatal().Err(err).Msg("Failed to get Kubernetes config")
+		}
+
+		mgr, err := ctrl.NewManager(k8sConfig, ctrl.Options{
 			Scheme: scheme,
 		})
 		if err != nil {
@@ -64,8 +69,13 @@ var rootCmd = &cobra.Command{
 			Str("nix_config", nixConfigMap).
 			Msg("Starting Nix remote builder controller")
 
+		log.Info().Msg("Controller manager starting...")
 		if err := mgr.Start(ctx); err != nil {
-			log.Fatal().Err(err).Msg("Controller manager failed")
+			if err == context.Canceled {
+				log.Info().Msg("Controller manager stopped gracefully")
+			} else {
+				log.Fatal().Err(err).Msg("Controller manager failed")
+			}
 		}
 	},
 }
