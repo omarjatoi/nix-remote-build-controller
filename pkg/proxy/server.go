@@ -18,10 +18,13 @@ import (
 )
 
 type SSHProxy struct {
-	listener    net.Listener
-	hostKey     ssh.Signer
-	sessions    map[string]*ProxySession
-	sessionsMux sync.RWMutex
+	listener     net.Listener
+	hostKey      ssh.Signer
+	sessions     map[string]*ProxySession
+	sessionsMux  sync.RWMutex
+	activeConns  sync.WaitGroup
+	shutdownChan chan struct{}
+	shutdownOnce sync.Once
 }
 
 type ProxySession struct {
@@ -63,9 +66,10 @@ func NewSSHProxy(addr, hostKeyPath string) (*SSHProxy, error) {
 	}
 
 	proxy := &SSHProxy{
-		listener: listener,
-		hostKey:  hostKey,
-		sessions: make(map[string]*ProxySession),
+		listener:     listener,
+		hostKey:      hostKey,
+		sessions:     make(map[string]*ProxySession),
+		shutdownChan: make(chan struct{}),
 	}
 
 	log.Info().Str("address", addr).Msg("SSH proxy listening")
@@ -80,19 +84,32 @@ func (p *SSHProxy) Start(ctx context.Context) error {
 
 	go func() {
 		for {
-			conn, err := p.listener.Accept()
-			if err != nil {
-				errChan <- err
+			select {
+			case <-p.shutdownChan:
 				return
+			default:
+				conn, err := p.listener.Accept()
+				if err != nil {
+					select {
+					case errChan <- err:
+					case <-p.shutdownChan:
+					}
+					return
+				}
+				select {
+				case connChan <- conn:
+				case <-p.shutdownChan:
+					conn.Close()
+					return
+				}
 			}
-			connChan <- conn
 		}
 	}()
 
 	for {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return p.gracefulShutdown(ctx)
 		case err := <-errChan:
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -100,9 +117,42 @@ func (p *SSHProxy) Start(ctx context.Context) error {
 			log.Error().Err(err).Msg("Failed to accept connection")
 			return err
 		case conn := <-connChan:
-			go p.handleConnection(conn)
+			p.activeConns.Add(1)
+			go func() {
+				defer p.activeConns.Done()
+				p.handleConnection(conn)
+			}()
 		}
 	}
+}
+
+func (p *SSHProxy) gracefulShutdown(ctx context.Context) error {
+	p.shutdownOnce.Do(func() {
+		close(p.shutdownChan)
+	})
+
+	log.Info().Int("active_connections", p.getActiveSessionCount()).Msg("Gracefully terminating, no new connections will be accepted")
+
+	done := make(chan struct{})
+	go func() {
+		p.activeConns.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		log.Info().Msg("All connections completed, terminating the proxy")
+	case <-ctx.Done():
+		log.Warn().Msg("Shutdown timeout reached, the proxy will be forcefully terminated")
+	}
+
+	return ctx.Err()
+}
+
+func (p *SSHProxy) getActiveSessionCount() int {
+	p.sessionsMux.RLock()
+	defer p.sessionsMux.RUnlock()
+	return len(p.sessions)
 }
 
 func (p *SSHProxy) handleConnection(netConn net.Conn) {
