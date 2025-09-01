@@ -37,7 +37,7 @@
             pname = "proxy";
             inherit version;
             src = ./.;
-            vendorHash = "sha256-hpAsYPhiYnTpY5Z7QZz9cr5RtleHnR1ezgoVaQ+cvp0=";
+            vendorHash = "sha256-cbd/DtpDh/1Wi1zLkOzLBfT2zX3piIw4j/mBcNA0QnE=";
             subPackages = [ "cmd/proxy" ];
             ldflags = [
               "-s"
