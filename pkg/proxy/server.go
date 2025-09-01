@@ -12,6 +12,7 @@ import (
 	"os"
 	"sync"
 
+	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/crypto/ssh"
 )
@@ -82,7 +83,6 @@ func (p *SSHProxy) Start(ctx context.Context) error {
 				log.Error().Err(err).Msg("Failed to accept connection")
 				continue
 			}
-
 			go p.handleConnection(conn)
 		}
 	}
@@ -146,14 +146,19 @@ func (p *SSHProxy) handleChannel(session *ProxySession, newChannel ssh.NewChanne
 		log.Info().Str("session_id", session.ID).Str("request_type", req.Type).Msg("New SSH request")
 		switch req.Type {
 		case "exec":
+			log.Debug().Str("session_id", session.ID).Str("command", string(req.Payload)).Msg("Executing command")
 			req.Reply(false, nil)
 		case "shell":
+			log.Debug().Str("session_id", session.ID).Msg("Starting shell")
 			req.Reply(false, nil)
 		case "env":
+			log.Debug().Str("session_id", session.ID).Msg("Setting environment variables")
 			req.Reply(false, nil)
 		case "pty-req":
+			log.Debug().Str("session_id", session.ID).Msg("Requesting pseudo-terminal")
 			req.Reply(false, nil)
 		default:
+			log.Debug().Str("session_id", session.ID).Str("request_type", req.Type).Msg("Unknown SSH request")
 			req.Reply(false, nil)
 		}
 	}
@@ -190,7 +195,5 @@ func loadHostKey(path string) (ssh.Signer, error) {
 }
 
 func generateSessionID() string {
-	b := make([]byte, 8)
-	rand.Read(b)
-	return fmt.Sprintf("%x", b)
+	return uuid.Must(uuid.NewV7()).String()
 }
