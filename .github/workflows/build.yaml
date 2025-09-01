@@ -16,6 +16,9 @@ jobs:
       id-token: write
       contents: read
       packages: write
+    strategy:
+      matrix:
+        image: [controller, proxy, builder]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -30,26 +33,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build controller image
-        run: nix build .#controller-image
+      - name: Build ${{ matrix.image }} image
+        run: nix build .#${{ matrix.image }}-image
 
-      - name: Load and push controller image
+      - name: Load and push ${{ matrix.image }} image
         run: |
           docker load < result
-          docker push ${{ env.REGISTRY }}/${{ github.repository }}/controller:latest
-
-      - name: Build proxy image
-        run: nix build .#proxy-image
-
-      - name: Load and push proxy image
-        run: |
-          docker load < result
-          docker push ${{ env.REGISTRY }}/${{ github.repository }}/proxy:latest
-
-      - name: Build builder image
-        run: nix build .#builder-image
-
-      - name: Load and push builder image
-        run: |
-          docker load < result
-          docker push ${{ env.REGISTRY }}/${{ github.repository }}/builder:latest
+          docker push ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.image }}:latest
