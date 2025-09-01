@@ -21,7 +21,7 @@
       {
         packages = {
           controller = pkgs.buildGoModule {
-            pname = "nix-remote-build-controller";
+            pname = "controller";
             inherit version;
             src = ./.;
             vendorHash = "sha256-hpAsYPhiYnTpY5Z7QZz9cr5RtleHnR1ezgoVaQ+cvp0=";
@@ -34,7 +34,7 @@
           };
 
           proxy = pkgs.buildGoModule {
-            pname = "nix-remote-build-proxy";
+            pname = "proxy";
             inherit version;
             src = ./.;
             vendorHash = "sha256-hpAsYPhiYnTpY5Z7QZz9cr5RtleHnR1ezgoVaQ+cvp0=";
