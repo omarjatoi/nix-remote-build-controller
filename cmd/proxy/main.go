@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 )
 
@@ -14,7 +15,7 @@ var rootCmd = &cobra.Command{
 	Short: "SSH proxy server for Nix remote builders",
 	Long:  "An SSH proxy that routes Nix build requests to dynamic Kubernetes builder pods",
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("Starting Nix remote builder SSH proxy...")
+		log.Info().Msg("Starting Nix remote builder SSH proxy")
 	},
 }
 

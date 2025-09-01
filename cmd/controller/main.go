@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 )
 
@@ -14,7 +15,7 @@ var rootCmd = &cobra.Command{
 	Short: "Kubernetes controller for Nix remote builders",
 	Long:  "A Kubernetes controller that manages dynamic Nix remote builder pods",
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("Starting Nix remote builder controller...")
+		log.Info().Msg("Starting Nix remote builder controller")
 	},
 }
 
