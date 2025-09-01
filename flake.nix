@@ -67,44 +67,17 @@
           builder-image = pkgs.dockerTools.buildImage {
             name = "ghcr.io/omarjatoi/nix-remote-build-controller/builder";
             tag = "latest";
-            contents = with pkgs; [
-              nix
-              openssh
-              coreutils
-              bash
-            ];
+            fromImage = pkgs.dockerTools.pullImage {
+              imageName = "nixos/nix";
+              imageDigest = "sha256:0e6ade350a4d86d76dd4046a654ccbbb58d14fe93b6e3deef42c1d0fd9db3849";
+              sha256 = "sha256-zdGBgjbw+Z8iP5hu5oCkehO6L/VFlWmUiGsB4Y2z6i0=";
+            };
             config = {
-              Cmd = [
-                "${pkgs.openssh}/bin/sshd"
-                "-D"
-                "-e"
-              ];
+              Cmd = [ "sh" "-c" "nix-env -iA nixpkgs.openssh && adduser -D nixbld && ssh-keygen -A && exec sshd -D" ];
               ExposedPorts = {
                 "22/tcp" = { };
               };
             };
-            runAsRoot = ''
-              # Create nixbld user
-              ${pkgs.shadow}/bin/useradd -m -s ${pkgs.bash}/bin/bash nixbld
-
-              # Setup SSH
-              mkdir -p /etc/ssh /home/nixbld/.ssh
-              ${pkgs.openssh}/bin/ssh-keygen -A
-
-              # Configure SSH daemon
-              cat > /etc/ssh/sshd_config << 'EOF'
-              Port 22
-              PermitRootLogin no
-              PasswordAuthentication no
-              PubkeyAuthentication yes
-              AuthorizedKeysFile .ssh/authorized_keys
-              UsePAM no
-              EOF
-
-              # Setup Nix for nixbld user
-              mkdir -p /nix/var/nix/profiles/per-user/nixbld
-              chown nixbld:nixbld /nix/var/nix/profiles/per-user/nixbld
-            '';
           };
 
           default = self.packages.${system}.controller;
