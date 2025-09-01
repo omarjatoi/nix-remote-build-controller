@@ -11,10 +11,18 @@ import (
 	"net"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
+	"github.com/omarjatoi/nix-remote-build-controller/pkg/apis/nixbuilder/v1alpha1"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/crypto/ssh"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/watch"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/config"
 )
 
 type SSHProxy struct {
@@ -25,6 +33,8 @@ type SSHProxy struct {
 	activeConns  sync.WaitGroup
 	shutdownChan chan struct{}
 	shutdownOnce sync.Once
+	k8sClient    client.Client
+	namespace    string
 }
 
 type ProxySession struct {
@@ -42,7 +52,7 @@ const (
 	SessionClosed
 )
 
-func NewSSHProxy(addr, hostKeyPath string) (*SSHProxy, error) {
+func NewSSHProxy(addr, hostKeyPath, namespace string) (*SSHProxy, error) {
 	var hostKey ssh.Signer
 	var err error
 
@@ -65,11 +75,29 @@ func NewSSHProxy(addr, hostKeyPath string) (*SSHProxy, error) {
 		return nil, fmt.Errorf("failed to listen on %s: %w", addr, err)
 	}
 
+	// Create Kubernetes client
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		return nil, fmt.Errorf("failed to add client-go scheme: %w", err)
+	}
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		return nil, fmt.Errorf("failed to add NixBuilder scheme: %w", err)
+	}
+
+	k8sClient, err := client.New(config.GetConfigOrDie(), client.Options{
+		Scheme: scheme,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Kubernetes client: %w", err)
+	}
+
 	proxy := &SSHProxy{
 		listener:     listener,
 		hostKey:      hostKey,
 		sessions:     make(map[string]*ProxySession),
 		shutdownChan: make(chan struct{}),
+		k8sClient:    k8sClient,
+		namespace:    namespace,
 	}
 
 	log.Info().Str("address", addr).Msg("SSH proxy listening")
