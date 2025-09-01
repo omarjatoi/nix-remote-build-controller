@@ -48,7 +48,7 @@
 
           controller-image = pkgs.dockerTools.buildImage {
             name = "ghcr.io/omarjatoi/nix-remote-build-controller/controller";
-            tag = "latest";
+            tag = "${version}";
             contents = [ self.packages.${system}.controller ];
             config = {
               Cmd = [ "${self.packages.${system}.controller}/bin/controller" ];
@@ -57,7 +57,7 @@
 
           proxy-image = pkgs.dockerTools.buildImage {
             name = "ghcr.io/omarjatoi/nix-remote-build-controller/proxy";
-            tag = "latest";
+            tag = "${version}";
             contents = [ self.packages.${system}.proxy ];
             config = {
               Cmd = [ "${self.packages.${system}.proxy}/bin/proxy" ];
@@ -66,7 +66,7 @@
 
           builder-image = pkgs.dockerTools.buildImage {
             name = "ghcr.io/omarjatoi/nix-remote-build-controller/builder";
-            tag = "latest";
+            tag = "${version}";
             fromImage = pkgs.dockerTools.pullImage {
               imageName = "nixos/nix";
               imageDigest = "sha256:0e6ade350a4d86d76dd4046a654ccbbb58d14fe93b6e3deef42c1d0fd9db3849";
