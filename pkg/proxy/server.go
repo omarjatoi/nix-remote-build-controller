@@ -73,16 +73,33 @@ func NewSSHProxy(addr, hostKeyPath string) (*SSHProxy, error) {
 }
 
 func (p *SSHProxy) Start(ctx context.Context) error {
+	defer p.listener.Close()
+
+	connChan := make(chan net.Conn)
+	errChan := make(chan error)
+
+	go func() {
+		for {
+			conn, err := p.listener.Accept()
+			if err != nil {
+				errChan <- err
+				return
+			}
+			connChan <- conn
+		}
+	}()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		default:
-			conn, err := p.listener.Accept()
-			if err != nil {
-				log.Error().Err(err).Msg("Failed to accept connection")
-				continue
+		case err := <-errChan:
+			if ctx.Err() != nil {
+				return ctx.Err()
 			}
+			log.Error().Err(err).Msg("Failed to accept connection")
+			return err
+		case conn := <-connChan:
 			go p.handleConnection(conn)
 		}
 	}
