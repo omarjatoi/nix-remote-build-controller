@@ -52,7 +52,7 @@ func init() {
 	rootCmd.Flags().IntVarP(&port, "port", "p", 2222, "SSH proxy server port")
 	rootCmd.Flags().StringVarP(&hostKeyPath, "host-key", "k", "", "Path to provided SSH host private key file")
 	rootCmd.Flags().StringVarP(&namespace, "namespace", "n", "default", "Kubernetes namespace for build requests")
-	rootCmd.Flags().StringVarP(&remoteUser, "remote-user", "u", "root", "SSH username for builder pods")
+	rootCmd.Flags().StringVarP(&remoteUser, "remote-user", "u", "nixbld", "SSH username for builder pods")
 	rootCmd.Flags().Int32VarP(&remotePort, "remote-port", "r", 22, "SSH port on builder pods")
 	rootCmd.AddCommand(versionCmd)
 }
