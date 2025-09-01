@@ -1,3 +1,3 @@
 module github.com/omarjatoi/nix-remote-build-controller
 
-go 1.25.0
+go 1.24.6

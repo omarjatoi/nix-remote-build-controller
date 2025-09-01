@@ -1,15 +1,70 @@
 {
-  description = "Flake for Nix remote build controller";
+  description = "Kubernetes controller for dynamically scaling Nix remote builders";
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs?ref=nixos-unstable";
+    flake-utils.url = "github:numtide/flake-utils";
   };
 
-  outputs = { self, nixpkgs }: {
+  outputs =
+    {
+      self,
+      nixpkgs,
+      flake-utils,
+    }:
+    flake-utils.lib.eachDefaultSystem (
+      system:
+      let
+        pkgs = nixpkgs.legacyPackages.${system};
+        version = "0.1.0";
+      in
+      {
+        packages = {
+          controller = pkgs.buildGoModule {
+            pname = "nix-remote-build-controller";
+            inherit version;
+            src = ./.;
+            vendorHash = null;
+            subPackages = [ "cmd/controller" ];
+            ldflags = [
+              "-s"
+              "-w"
+              "-X main.version=${version}"
+            ];
+          };
 
-    packages.x86_64-linux.hello = nixpkgs.legacyPackages.x86_64-linux.hello;
+          proxy = pkgs.buildGoModule {
+            pname = "nix-remote-build-proxy";
+            inherit version;
+            src = ./.;
+            vendorHash = null;
+            subPackages = [ "cmd/proxy" ];
+            ldflags = [
+              "-s"
+              "-w"
+              "-X main.version=${version}"
+            ];
+          };
 
-    packages.x86_64-linux.default = self.packages.x86_64-linux.hello;
+          default = self.packages.${system}.controller;
+        };
 
-  };
+        devShells.default = pkgs.mkShell {
+          buildInputs = with pkgs; [
+            go
+            golangci-lint
+          ];
+        };
+
+        apps = {
+          controller = flake-utils.lib.mkApp {
+            drv = self.packages.${system}.controller;
+          };
+          proxy = flake-utils.lib.mkApp {
+            drv = self.packages.${system}.proxy;
+          };
+          default = self.apps.${system}.controller;
+        };
+      }
+    );
 }
