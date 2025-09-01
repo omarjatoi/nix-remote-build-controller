@@ -24,7 +24,7 @@
             pname = "nix-remote-build-controller";
             inherit version;
             src = ./.;
-            vendorHash = null;
+            vendorHash = "sha256-hpAsYPhiYnTpY5Z7QZz9cr5RtleHnR1ezgoVaQ+cvp0=";
             subPackages = [ "cmd/controller" ];
             ldflags = [
               "-s"
@@ -37,7 +37,7 @@
             pname = "nix-remote-build-proxy";
             inherit version;
             src = ./.;
-            vendorHash = null;
+            vendorHash = "sha256-hpAsYPhiYnTpY5Z7QZz9cr5RtleHnR1ezgoVaQ+cvp0=";
             subPackages = [ "cmd/proxy" ];
             ldflags = [
               "-s"
