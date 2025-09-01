@@ -1,0 +1,57 @@
+name: Build and Push Images
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Install Nix
+      uses: DeterminateSystems/nix-installer-action@main
+
+    - name: Setup FlakeHub cache
+      uses: DeterminateSystems/flakehub-cache-action@main
+
+    - name: Log in to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Build controller image
+      run: nix build .#controller-image
+
+    - name: Load and push controller image
+      run: |
+        docker load < result
+        docker push ${{ env.REGISTRY }}/${{ github.repository }}/controller:latest
+
+    - name: Build proxy image
+      run: nix build .#proxy-image
+
+    - name: Load and push proxy image
+      run: |
+        docker load < result
+        docker push ${{ env.REGISTRY }}/${{ github.repository }}/proxy:latest
+
+    - name: Build builder image
+      run: nix build .#builder-image
+
+    - name: Load and push builder image
+      run: |
+        docker load < result
+        docker push ${{ env.REGISTRY }}/${{ github.repository }}/builder:latest
