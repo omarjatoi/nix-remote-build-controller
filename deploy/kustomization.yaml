@@ -1,0 +1,23 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- crd.yaml
+- rbac.yaml
+- controller-deployment.yaml
+- proxy-deployment.yaml
+
+commonLabels:
+  app.kubernetes.io/name: nix-remote-build-controller
+  app.kubernetes.io/version: latest
+
+images:
+- name: controller
+  newName: ghcr.io/omarjatoi/nix-remote-build-controller/controller
+  newTag: latest
+- name: proxy
+  newName: ghcr.io/omarjatoi/nix-remote-build-controller/proxy
+  newTag: latest
+- name: builder
+  newName: ghcr.io/omarjatoi/nix-remote-build-controller/builder
+  newTag: latest

@@ -1,0 +1,50 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: proxy
+  namespace: default
+spec:
+  type: LoadBalancer
+  ports:
+  - port: 22
+    targetPort: 2222
+    protocol: TCP
+    name: ssh
+  selector:
+    component: proxy
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: proxy
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      component: proxy
+  template:
+    metadata:
+      labels:
+        component: proxy
+    spec:
+      serviceAccountName: nix-remote-build-controller
+      containers:
+      - name: proxy
+        image: proxy
+        imagePullPolicy: Always
+        args:
+        - --addr=:2222
+        - --namespace=default
+        - --remote-user=nixbld
+        - --remote-port=22
+        ports:
+        - containerPort: 2222
+          name: ssh
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi

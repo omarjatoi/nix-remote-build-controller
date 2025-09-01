@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: controller
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      component: controller
+  template:
+    metadata:
+      labels:
+        component: controller
+    spec:
+      serviceAccountName: nix-remote-build-controller
+      containers:
+      - name: controller
+        image: controller
+        imagePullPolicy: Always
+        args:
+        - --builder-image=builder
+        - --ssh-port=22
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
