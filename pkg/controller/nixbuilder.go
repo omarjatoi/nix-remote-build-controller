@@ -11,6 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	nixv1alpha1 "github.com/omarjatoi/nix-remote-build-controller/pkg/apis/nixbuilder/v1alpha1"
 )
@@ -26,6 +27,14 @@ type NixBuildRequestReconciler struct {
 
 // Reconcile handles NixBuildRequest events
 func (r *NixBuildRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	// Check for shutdown early
+	select {
+	case <-ctx.Done():
+		log.Info().Str("build_request", req.Name).Msg("Reconciliation cancelled due to shutdown")
+		return ctrl.Result{}, ctx.Err()
+	default:
+	}
+
 	var buildReq nixv1alpha1.NixBuildRequest
 	if err := r.Get(ctx, req.NamespacedName, &buildReq); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
