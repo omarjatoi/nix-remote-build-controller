@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -36,6 +38,8 @@ type SSHProxy struct {
 	namespace    string
 	remoteUser   string
 	remotePort   int32
+	healthServer *http.Server
+	shuttingDown atomic.Bool
 }
 
 type ProxySession struct {
@@ -53,7 +57,7 @@ const (
 	SessionClosed
 )
 
-func NewSSHProxy(addr, hostKeyPath, namespace, remoteUser string, remotePort int32) (*SSHProxy, error) {
+func NewSSHProxy(addr, hostKeyPath, namespace, remoteUser string, remotePort int32, healthPort int) (*SSHProxy, error) {
 	var hostKey ssh.Signer
 	var err error
 
@@ -106,6 +110,10 @@ func NewSSHProxy(addr, hostKeyPath, namespace, remoteUser string, remotePort int
 		namespace:    namespace,
 		remoteUser:   remoteUser,
 		remotePort:   remotePort,
+	}
+
+	if err := proxy.startHealthServer(healthPort); err != nil {
+		return nil, fmt.Errorf("failed to start health server: %w", err)
 	}
 
 	log.Info().Str("address", addr).Msg("SSH proxy listening")
@@ -163,11 +171,15 @@ func (p *SSHProxy) Start(ctx context.Context) error {
 }
 
 func (p *SSHProxy) gracefulShutdown(ctx context.Context) error {
+	// Mark as unhealthy FIRST
+	p.shuttingDown.Store(true)
+	log.Info().Msg("Marked proxy as unhealthy, no new connections will be accepted")
+
 	p.shutdownOnce.Do(func() {
 		close(p.shutdownChan)
 	})
 
-	log.Info().Int("active_connections", p.getActiveSessionCount()).Msg("Gracefully terminating, no new connections will be accepted")
+	log.Info().Int("active_connections", p.getActiveSessionCount()).Msg("Gracefully terminating, waiting for active connections to complete")
 
 	done := make(chan struct{})
 	go func() {
@@ -180,6 +192,17 @@ func (p *SSHProxy) gracefulShutdown(ctx context.Context) error {
 		log.Info().Msg("All connections completed, terminating the proxy")
 	case <-ctx.Done():
 		log.Warn().Msg("Shutdown timeout reached, the proxy will be forcefully terminated")
+	}
+
+	// Shutdown health server last
+	if p.healthServer != nil {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := p.healthServer.Shutdown(shutdownCtx); err != nil {
+			log.Warn().Err(err).Msg("Health server shutdown failed")
+		} else {
+			log.Info().Msg("Health server shutdown completed")
+		}
 	}
 
 	return ctx.Err()
@@ -442,4 +465,40 @@ func loadHostKey(path string) (ssh.Signer, error) {
 
 func generateSessionID() string {
 	return uuid.Must(uuid.NewV7()).String()
+}
+
+func (p *SSHProxy) startHealthServer(port int) error {
+	mux := http.NewServeMux()
+
+	// Liveness probe - "is the process running?"
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
+	})
+
+	// Readiness probe - "can you handle new requests?"
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		if p.shuttingDown.Load() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write([]byte("shutting down"))
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ready"))
+	})
+
+	p.healthServer = &http.Server{
+		Addr:    fmt.Sprintf(":%d", port),
+		Handler: mux,
+	}
+
+	go func() {
+		log.Info().Int("port", port).Msg("Health server starting")
+		if err := p.healthServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Error().Err(err).Msg("Health server failed")
+		}
+	}()
+
+	return nil
 }
