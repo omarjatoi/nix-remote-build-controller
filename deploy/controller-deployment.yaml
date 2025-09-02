@@ -21,6 +21,23 @@ spec:
         args:
         - --builder-image=builder
         - --ssh-port=22
+        - --health-port=8081
+        - --shutdown-timeout=30s
+        ports:
+        - containerPort: 8081
+          name: health
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8081
+          initialDelaySeconds: 15
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8081
+          initialDelaySeconds: 10
+          periodSeconds: 15
         resources:
           requests:
             cpu: 100m
