@@ -20,7 +20,7 @@ spec:
         imagePullPolicy: Always
         args:
         - --builder-image=builder
-        - --ssh-port=22
+        - --remote-port=22
         - --health-port=8081
         - --shutdown-timeout=30s
         ports:

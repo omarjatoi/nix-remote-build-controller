@@ -22,7 +22,7 @@ import (
 var (
 	version         = "dev"
 	builderImage    string
-	sshPort         int32
+	remotePort      int32
 	nixConfigMap    string
 	healthPort      int
 	shutdownTimeout time.Duration
@@ -60,7 +60,7 @@ var rootCmd = &cobra.Command{
 			Client:       mgr.GetClient(),
 			Scheme:       mgr.GetScheme(),
 			BuilderImage: builderImage,
-			SSHPort:      sshPort,
+			RemotePort:   remotePort,
 			NixConfigMap: nixConfigMap,
 		}
 
@@ -98,7 +98,7 @@ var rootCmd = &cobra.Command{
 
 		log.Info().
 			Str("builder_image", builderImage).
-			Int32("ssh_port", sshPort).
+			Int32("remote_port", remotePort).
 			Str("nix_config", nixConfigMap).
 			Int("health_port", healthPort).
 			Dur("shutdown_timeout", shutdownTimeout).
@@ -161,7 +161,7 @@ func setupHealthChecks(mgr ctrl.Manager, shuttingDown *atomic.Bool, port int) er
 
 func init() {
 	rootCmd.Flags().StringVar(&builderImage, "builder-image", "nixos/nix:latest", "Builder container image")
-	rootCmd.Flags().Int32Var(&sshPort, "ssh-port", 22, "SSH port in builder pods")
+	rootCmd.Flags().Int32Var(&remotePort, "remote-port", 22, "SSH port in builder pods")
 	rootCmd.Flags().StringVar(&nixConfigMap, "nix-config", "", "ConfigMap containing nix.conf (optional)")
 	rootCmd.Flags().IntVar(&healthPort, "health-port", 8081, "Health check server port")
 	rootCmd.Flags().DurationVar(&shutdownTimeout, "shutdown-timeout", 30*time.Second, "Graceful shutdown timeout")

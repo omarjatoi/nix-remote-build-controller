@@ -21,7 +21,7 @@ type NixBuildRequestReconciler struct {
 	client.Client
 	Scheme       *runtime.Scheme
 	BuilderImage string
-	SSHPort      int32
+	RemotePort   int32
 	NixConfigMap string
 }
 
@@ -199,7 +199,7 @@ func (r *NixBuildRequestReconciler) createBuilderPod(buildReq *nixv1alpha1.NixBu
 				Image:   r.getBuilderImage(buildReq),
 				Command: []string{"/usr/sbin/sshd", "-D", "-e"},
 				Ports: []corev1.ContainerPort{{
-					ContainerPort: r.SSHPort,
+					ContainerPort: r.RemotePort,
 					Protocol:      corev1.ProtocolTCP,
 				}},
 				Resources: buildReq.Spec.Resources,
