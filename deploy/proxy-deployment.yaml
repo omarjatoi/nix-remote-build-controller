@@ -34,13 +34,28 @@ spec:
         image: proxy
         imagePullPolicy: Always
         args:
-        - --addr=:2222
+        - --port=2222
+        - --health-port=8080
         - --namespace=default
         - --remote-user=nixbld
         - --remote-port=22
         ports:
         - containerPort: 2222
           name: ssh
+        - containerPort: 8080
+          name: health
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
         resources:
           requests:
             cpu: 100m
