@@ -39,6 +39,26 @@ func (r *NixBuildRequestReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	if err := r.Get(ctx, req.NamespacedName, &buildReq); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
+
+	// Add finalizer for new resources to ensure cleanup
+	if buildReq.DeletionTimestamp.IsZero() && !controllerutil.ContainsFinalizer(&buildReq, "nix.io/cleanup") {
+		controllerutil.AddFinalizer(&buildReq, "nix.io/cleanup")
+		if err := r.Update(ctx, &buildReq); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{Requeue: true}, nil
+	}
+
+	// Handle deletion with finalizer
+	if !buildReq.DeletionTimestamp.IsZero() {
+		if err := r.cleanup(ctx, &buildReq); err != nil {
+			log.Error().Err(err).Str("session_id", buildReq.Spec.SessionID).Msg("Failed to cleanup build request")
+			return ctrl.Result{RequeueAfter: time.Second * 10}, err
+		}
+		controllerutil.RemoveFinalizer(&buildReq, "nix.io/cleanup")
+		return ctrl.Result{}, r.Update(ctx, &buildReq)
+	}
+
 	log.Info().Str("session_id", buildReq.Spec.SessionID).Str("phase", string(buildReq.Status.Phase)).Msg("Reconciling NixBuildRequest")
 
 	switch buildReq.Status.Phase {
@@ -173,9 +193,10 @@ func (r *NixBuildRequestReconciler) createBuilderPod(buildReq *nixv1alpha1.NixBu
 		Spec: corev1.PodSpec{
 			RestartPolicy:         corev1.RestartPolicyNever,
 			ActiveDeadlineSeconds: buildReq.Spec.TimeoutSeconds,
+			NodeSelector:          buildReq.Spec.NodeSelector,
 			Containers: []corev1.Container{{
 				Name:    "nix-builder",
-				Image:   r.BuilderImage,
+				Image:   r.getBuilderImage(buildReq),
 				Command: []string{"/usr/sbin/sshd", "-D", "-e"},
 				Ports: []corev1.ContainerPort{{
 					ContainerPort: r.SSHPort,
@@ -208,11 +229,70 @@ func (r *NixBuildRequestReconciler) createBuilderPod(buildReq *nixv1alpha1.NixBu
 	return pod
 }
 
+func (r *NixBuildRequestReconciler) getBuilderImage(buildReq *nixv1alpha1.NixBuildRequest) string {
+	if buildReq.Spec.Image != "" {
+		return buildReq.Spec.Image
+	}
+	return r.BuilderImage
+}
+
 func (r *NixBuildRequestReconciler) updateStatus(ctx context.Context, buildReq *nixv1alpha1.NixBuildRequest) (ctrl.Result, error) {
 	if err := r.Status().Update(ctx, buildReq); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
+}
+
+func (r *NixBuildRequestReconciler) cleanup(ctx context.Context, buildReq *nixv1alpha1.NixBuildRequest) error {
+	log.Info().Str("session_id", buildReq.Spec.SessionID).Msg("Cleaning up build request")
+
+	// Delete associated pod if it exists
+	if buildReq.Status.PodName != "" {
+		var pod corev1.Pod
+		if err := r.Get(ctx, client.ObjectKey{
+			Namespace: buildReq.Namespace,
+			Name:      buildReq.Status.PodName,
+		}, &pod); err == nil {
+			if err := r.Delete(ctx, &pod); err != nil {
+				log.Error().Err(err).Str("pod_name", buildReq.Status.PodName).Msg("Failed to delete pod during cleanup")
+				return err
+			}
+			log.Info().Str("pod_name", buildReq.Status.PodName).Msg("Deleted pod during cleanup")
+		}
+	}
+
+	return nil
+}
+
+func (r *NixBuildRequestReconciler) GracefulShutdown(ctx context.Context) error {
+	log.Info().Msg("Starting graceful controller shutdown")
+
+	// List all pending/creating build requests
+	var buildReqs nixv1alpha1.NixBuildRequestList
+	if err := r.List(ctx, &buildReqs); err != nil {
+		log.Error().Err(err).Msg("Failed to list build requests during shutdown")
+		return err
+	}
+
+	updatedCount := 0
+	for _, buildReq := range buildReqs.Items {
+		if buildReq.Status.Phase == nixv1alpha1.BuildPhasePending ||
+			buildReq.Status.Phase == nixv1alpha1.BuildPhaseCreating {
+
+			buildReq.Status.Phase = nixv1alpha1.BuildPhaseFailed
+			buildReq.Status.Message = "Controller shutdown during processing"
+			buildReq.Status.CompletionTime = &metav1.Time{Time: time.Now()}
+
+			if err := r.Status().Update(ctx, &buildReq); err != nil {
+				log.Error().Err(err).Str("build_request", buildReq.Name).Msg("Failed to update build request status during shutdown")
+			} else {
+				updatedCount++
+			}
+		}
+	}
+
+	log.Info().Int("updated_requests", updatedCount).Msg("Completed graceful shutdown cleanup")
+	return nil
 }
 
 // SetupWithManager sets up the controller with the Manager
