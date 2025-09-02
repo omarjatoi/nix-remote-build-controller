@@ -324,7 +324,6 @@ func (p *SSHProxy) routeToBuilder(ctx context.Context, session *ProxySession, ch
 	}
 	defer builderConn.Close()
 
-	// Open channel on builder for this session
 	builderChannel, builderRequests, err := builderConn.OpenChannel("session", nil)
 	if err != nil {
 		return fmt.Errorf("failed to open channel on builder: %w", err)
@@ -333,8 +332,21 @@ func (p *SSHProxy) routeToBuilder(ctx context.Context, session *ProxySession, ch
 
 	log.Info().Str("session_id", session.ID).Str("builder_addr", builderAddr).Msg("Connected to builder pod")
 
-	// Use WaitGroup to wait for all goroutines to complete
 	var wg sync.WaitGroup
+
+	// Forward requests: client -> builder
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		p.forwardRequests(ctx, requests, builderChannel, session.ID, "client->builder")
+	}()
+
+	// Forward requests: builder -> client
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		p.forwardRequests(ctx, builderRequests, channel, session.ID, "builder->client")
+	}()
 
 	// Forward data: client -> builder
 	wg.Add(1)
@@ -356,52 +368,6 @@ func (p *SSHProxy) routeToBuilder(ctx context.Context, session *ProxySession, ch
 		}
 	}()
 
-	// SSH requests, client -> builder
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case req, ok := <-requests:
-				if !ok {
-					return
-				}
-				log.Debug().Str("session_id", session.ID).Str("request_type", req.Type).Msg("Forwarding SSH request to builder")
-
-				// Forward request to builder
-				switch req.Type {
-				case "exec", "shell", "env", "pty-req":
-					accepted, err := builderChannel.SendRequest(req.Type, req.WantReply, req.Payload)
-					req.Reply(accepted && err == nil, nil)
-				default:
-					req.Reply(false, nil)
-				}
-			}
-		}
-	}()
-
-	// Responses, builder -> client
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case req, ok := <-builderRequests:
-				if !ok {
-					return
-				}
-				log.Debug().Str("session_id", session.ID).Str("request_type", req.Type).Msg("Forwarding SSH response from builder")
-				accepted, err := channel.SendRequest(req.Type, req.WantReply, req.Payload)
-				req.Reply(accepted && err == nil, nil)
-			}
-		}
-	}()
-
-	// Wait for all goroutines to complete
 	wg.Wait()
 
 	log.Info().Str("session_id", session.ID).Str("builder_addr", builderAddr).Msg("Completed build request")
@@ -411,6 +377,37 @@ func (p *SSHProxy) routeToBuilder(ctx context.Context, session *ProxySession, ch
 	}
 
 	return nil
+}
+
+func (p *SSHProxy) forwardRequests(ctx context.Context, src <-chan *ssh.Request, dst ssh.Channel, sessionID, direction string) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case req, ok := <-src:
+			if !ok {
+				return
+			}
+
+			log.Debug().
+				Str("session_id", sessionID).
+				Str("request_type", req.Type).
+				Str("direction", direction).
+				Bool("want_reply", req.WantReply).
+				Msg("Forwarding SSH request transparently")
+
+			accepted, err := dst.SendRequest(req.Type, req.WantReply, req.Payload)
+			if err != nil {
+				log.Error().
+					Err(err).
+					Str("session_id", sessionID).
+					Str("request_type", req.Type).
+					Str("direction", direction).
+					Msg("SSH request forwarding failed")
+			}
+			req.Reply(accepted && err == nil, nil)
+		}
+	}
 }
 
 func generateHostKey() (ssh.Signer, error) {
