@@ -4,15 +4,16 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"maps"
 )
 
 // NixBuildRequest represents a request for a Nix build that needs a dedicated builder pod
 type NixBuildRequest struct {
 	metav1.TypeMeta   `json:",inline"`
-	metav1.ObjectMeta `json:"metadata,omitempty"`
+	metav1.ObjectMeta `json:"metadata"`
 
-	Spec   NixBuildRequestSpec   `json:"spec,omitempty"`
-	Status NixBuildRequestStatus `json:"status,omitempty"`
+	Spec   NixBuildRequestSpec   `json:"spec"`
+	Status NixBuildRequestStatus `json:"status"`
 }
 
 // NixBuildRequestSpec defines the desired state of a Nix build request
@@ -21,7 +22,7 @@ type NixBuildRequestSpec struct {
 	SessionID string `json:"sessionId"`
 
 	// Resources defines the pod resource requirements
-	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
+	Resources corev1.ResourceRequirements `json:"resources"`
 
 	// Image specifies the builder container image
 	Image string `json:"image,omitempty"`
@@ -102,7 +103,7 @@ const (
 // NixBuildRequestList contains a list of NixBuildRequest
 type NixBuildRequestList struct {
 	metav1.TypeMeta `json:",inline"`
-	metav1.ListMeta `json:"metadata,omitempty"`
+	metav1.ListMeta `json:"metadata"`
 	Items           []NixBuildRequest `json:"items"`
 }
 
@@ -180,9 +181,7 @@ func (in *NixBuildRequestSpec) DeepCopyInto(out *NixBuildRequestSpec) {
 	if in.NodeSelector != nil {
 		in, out := &in.NodeSelector, &out.NodeSelector
 		*out = make(map[string]string, len(*in))
-		for key, val := range *in {
-			(*out)[key] = val
-		}
+		maps.Copy((*out), *in)
 	}
 }
 
