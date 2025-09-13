@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -25,6 +26,25 @@ type NixBuildRequestReconciler struct {
 	NixConfigMap string
 }
 
+// RFC 1123 DNS label regex: lowercase alphanumeric characters or '-',
+// must start and end with an alphanumeric character, max 63 characters
+var sessionIDRegex = regexp.MustCompile(`^[a-z0-9]([a-z0-9\-]{0,61}[a-z0-9])?$`)
+
+// validateSessionID validates that a sessionID meets Kubernetes naming requirements
+// for use in pod names (RFC 1123 DNS label)
+func validateSessionID(sessionID string) error {
+	if sessionID == "" {
+		return fmt.Errorf("sessionID cannot be empty")
+	}
+	if len(sessionID) > 240 {
+		return fmt.Errorf("sessionID too long: %d characters (max 240 to accommodate pod name prefix)", len(sessionID))
+	}
+	if !sessionIDRegex.MatchString(sessionID) {
+		return fmt.Errorf("sessionID %q is invalid: must be a lowercase RFC 1123 DNS label (lowercase alphanumeric characters or '-', must start and end with alphanumeric)", sessionID)
+	}
+	return nil
+}
+
 // Reconcile handles NixBuildRequest events
 func (r *NixBuildRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	// Check for shutdown early
@@ -38,6 +58,19 @@ func (r *NixBuildRequestReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	var buildReq nixv1alpha1.NixBuildRequest
 	if err := r.Get(ctx, req.NamespacedName, &buildReq); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	if err := validateSessionID(buildReq.Spec.SessionID); err != nil {
+		log.Error().Err(err).Str("session_id", buildReq.Spec.SessionID).Msg("Invalid sessionID")
+		buildReq.Status.Phase = nixv1alpha1.BuildPhaseFailed
+		buildReq.Status.Message = fmt.Sprintf("Invalid sessionID: %v", err)
+		if buildReq.Status.CompletionTime == nil {
+			buildReq.Status.CompletionTime = &metav1.Time{Time: time.Now()}
+		}
+		if err := r.Status().Update(ctx, &buildReq); err != nil {
+			log.Error().Err(err).Msg("Failed to update status after sessionID validation failure")
+		}
+		return ctrl.Result{}, nil // Don't requeue invalid requests
 	}
 
 	// Add finalizer for new resources to ensure cleanup
@@ -77,17 +110,40 @@ func (r *NixBuildRequestReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 }
 
 func (r *NixBuildRequestReconciler) handlePendingBuild(ctx context.Context, buildReq *nixv1alpha1.NixBuildRequest) (ctrl.Result, error) {
-	log.Info().Str("session_id", buildReq.Spec.SessionID).Msg("Creating builder pod")
+	podName := fmt.Sprintf("nix-builder-%s", buildReq.Spec.SessionID)
+	var existingPod corev1.Pod
+	err := r.Get(ctx, client.ObjectKey{
+		Namespace: buildReq.Namespace,
+		Name:      podName,
+	}, &existingPod)
 
+	if err == nil {
+		log.Info().Str("session_id", buildReq.Spec.SessionID).Msg("Builder pod already exists")
+		buildReq.Status.Phase = nixv1alpha1.BuildPhaseCreating
+		buildReq.Status.PodName = podName
+		if buildReq.Status.StartTime == nil {
+			buildReq.Status.StartTime = &metav1.Time{Time: time.Now()}
+		}
+		buildReq.Status.Message = "Builder pod exists"
+		return r.updateStatus(ctx, buildReq)
+	}
+
+	if err := client.IgnoreNotFound(err); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	log.Info().Str("session_id", buildReq.Spec.SessionID).Msg("Creating builder pod")
 	pod := r.createBuilderPod(buildReq)
 	if err := r.Create(ctx, pod); err != nil {
 		log.Error().Err(err).Str("session_id", buildReq.Spec.SessionID).Msg("Failed to create builder pod")
-		return ctrl.Result{}, err
+		return ctrl.Result{RequeueAfter: time.Second * 2}, err
 	}
 
 	buildReq.Status.Phase = nixv1alpha1.BuildPhaseCreating
 	buildReq.Status.PodName = pod.Name
-	buildReq.Status.StartTime = &metav1.Time{Time: time.Now()}
+	if buildReq.Status.StartTime == nil { // Only set if not already set
+		buildReq.Status.StartTime = &metav1.Time{Time: time.Now()}
+	}
 	buildReq.Status.Message = "Builder pod created"
 
 	if err := r.Status().Update(ctx, buildReq); err != nil {
@@ -104,8 +160,17 @@ func (r *NixBuildRequestReconciler) handleCreatingBuild(ctx context.Context, bui
 		Namespace: buildReq.Namespace,
 		Name:      buildReq.Status.PodName,
 	}, &pod); err != nil {
-		log.Error().Err(err).Str("session_id", buildReq.Spec.SessionID).Msg("Failed to get builder pod")
-		return ctrl.Result{}, err
+		if err := client.IgnoreNotFound(err); err != nil {
+			log.Error().Err(err).Str("session_id", buildReq.Spec.SessionID).Msg("Failed to get builder pod")
+			return ctrl.Result{}, err
+		}
+
+		log.Warn().Str("session_id", buildReq.Spec.SessionID).Msg("Builder pod was deleted, recreating")
+		buildReq.Status.Phase = nixv1alpha1.BuildPhasePending
+		buildReq.Status.PodName = ""
+		buildReq.Status.PodIP = ""
+		buildReq.Status.Message = "Builder pod was deleted, recreating"
+		return r.updateStatus(ctx, buildReq)
 	}
 
 	if pod.Status.Phase == corev1.PodRunning && pod.Status.PodIP != "" {
@@ -122,6 +187,13 @@ func (r *NixBuildRequestReconciler) handleCreatingBuild(ctx context.Context, bui
 		return ctrl.Result{}, nil
 	}
 
+	if pod.Status.Phase == corev1.PodFailed {
+		buildReq.Status.Phase = nixv1alpha1.BuildPhaseFailed
+		buildReq.Status.CompletionTime = &metav1.Time{Time: time.Now()}
+		buildReq.Status.Message = fmt.Sprintf("Builder pod failed: %s", pod.Status.Message)
+		return r.updateStatus(ctx, buildReq)
+	}
+
 	return ctrl.Result{RequeueAfter: time.Second * 2}, nil
 }
 
@@ -131,20 +203,32 @@ func (r *NixBuildRequestReconciler) handleRunningBuild(ctx context.Context, buil
 		Namespace: buildReq.Namespace,
 		Name:      buildReq.Status.PodName,
 	}, &pod); err != nil {
-		return ctrl.Result{}, client.IgnoreNotFound(err)
+		if err := client.IgnoreNotFound(err); err != nil {
+			return ctrl.Result{}, err
+		}
+
+		log.Warn().Str("session_id", buildReq.Spec.SessionID).Msg("Running builder pod was deleted")
+		buildReq.Status.Phase = nixv1alpha1.BuildPhaseFailed
+		buildReq.Status.CompletionTime = &metav1.Time{Time: time.Now()}
+		buildReq.Status.Message = "Build failed - pod was deleted"
+		return r.updateStatus(ctx, buildReq)
 	}
 
 	if pod.Status.Phase == corev1.PodSucceeded {
 		buildReq.Status.Phase = nixv1alpha1.BuildPhaseCompleted
-		buildReq.Status.CompletionTime = &metav1.Time{Time: time.Now()}
+		if buildReq.Status.CompletionTime == nil {
+			buildReq.Status.CompletionTime = &metav1.Time{Time: time.Now()}
+		}
 		buildReq.Status.Message = "Build completed successfully"
 		return r.updateStatus(ctx, buildReq)
 	}
 
 	if pod.Status.Phase == corev1.PodFailed {
 		buildReq.Status.Phase = nixv1alpha1.BuildPhaseFailed
-		buildReq.Status.CompletionTime = &metav1.Time{Time: time.Now()}
-		buildReq.Status.Message = "Build failed"
+		if buildReq.Status.CompletionTime == nil {
+			buildReq.Status.CompletionTime = &metav1.Time{Time: time.Now()}
+		}
+		buildReq.Status.Message = fmt.Sprintf("Build failed: %s", pod.Status.Message)
 		return r.updateStatus(ctx, buildReq)
 	}
 
