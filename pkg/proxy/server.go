@@ -395,10 +395,6 @@ func (p *SSHProxy) routeToBuilder(ctx context.Context, session *ProxySession, ch
 
 	log.Info().Str("session_id", session.ID).Str("builder_addr", builderAddr).Msg("Completed build request")
 
-	if err != nil && err != io.EOF {
-		log.Debug().Err(err).Str("session_id", session.ID).Msg("SSH forwarding ended")
-	}
-
 	return nil
 }
 
