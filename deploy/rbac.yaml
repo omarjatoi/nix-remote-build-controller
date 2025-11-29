@@ -9,18 +9,21 @@ kind: ClusterRole
 metadata:
   name: nix-remote-build-controller
 rules:
-- apiGroups: [""]
-  resources: ["pods"]
-  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-- apiGroups: [""]
-  resources: ["configmaps"]
-  verbs: ["get", "list", "watch"]
-- apiGroups: ["nix.io"]
-  resources: ["nixbuildrequests"]
-  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-- apiGroups: ["nix.io"] 
-  resources: ["nixbuildrequests/status"]
-  verbs: ["get", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["nix.io"]
+    resources: ["nixbuildrequests"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["nix.io"]
+    resources: ["nixbuildrequests/status"]
+    verbs: ["get", "update", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -31,6 +34,6 @@ roleRef:
   kind: ClusterRole
   name: nix-remote-build-controller
 subjects:
-- kind: ServiceAccount
-  name: nix-remote-build-controller
-  namespace: default
+  - kind: ServiceAccount
+    name: nix-remote-build-controller
+    namespace: default
