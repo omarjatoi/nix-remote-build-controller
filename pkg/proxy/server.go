@@ -19,6 +19,7 @@ import (
 	"github.com/omarjatoi/nix-remote-build-controller/pkg/apis/nixbuilder/v1alpha1"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/crypto/ssh"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -29,6 +30,7 @@ import (
 type SSHProxy struct {
 	listener     net.Listener
 	hostKey      ssh.Signer
+	clientKey    ssh.Signer
 	sessions     map[string]*ProxySession
 	sessionsMux  sync.RWMutex
 	activeConns  sync.WaitGroup
@@ -57,7 +59,7 @@ const (
 	SessionClosed
 )
 
-func NewSSHProxy(addr, hostKeyPath, namespace, remoteUser string, remotePort int32, healthPort int) (*SSHProxy, error) {
+func NewSSHProxy(ctx context.Context, addr, hostKeyPath, namespace, remoteUser string, remotePort int32, healthPort int) (*SSHProxy, error) {
 	var hostKey ssh.Signer
 	var err error
 
@@ -73,6 +75,11 @@ func NewSSHProxy(addr, hostKeyPath, namespace, remoteUser string, remotePort int
 		if err != nil {
 			return nil, fmt.Errorf("failed to generate host key: %w", err)
 		}
+	}
+
+	clientKey, err := generateHostKey()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate client key: %w", err)
 	}
 
 	listener, err := net.Listen("tcp", addr)
@@ -104,6 +111,7 @@ func NewSSHProxy(addr, hostKeyPath, namespace, remoteUser string, remotePort int
 	proxy := &SSHProxy{
 		listener:     listener,
 		hostKey:      hostKey,
+		clientKey:    clientKey,
 		sessions:     make(map[string]*ProxySession),
 		shutdownChan: make(chan struct{}),
 		k8sClient:    k8sClient,
@@ -114,6 +122,10 @@ func NewSSHProxy(addr, hostKeyPath, namespace, remoteUser string, remotePort int
 
 	if err := proxy.startHealthServer(healthPort); err != nil {
 		return nil, fmt.Errorf("failed to start health server: %w", err)
+	}
+
+	if err := proxy.ensureSSHKeySecret(context.Background()); err != nil {
+		return nil, fmt.Errorf("failed to ensure SSH key secret: %w", err)
 	}
 
 	log.Info().Str("address", addr).Msg("SSH proxy listening")
@@ -272,6 +284,19 @@ func (p *SSHProxy) handleChannel(ctx context.Context, session *ProxySession, new
 		log.Error().Err(err).Str("session_id", session.ID).Msg("Failed to create build request")
 		return
 	}
+	defer func() {
+		// Delete the build request when the session ends
+		deleteCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := p.k8sClient.Delete(deleteCtx, &v1alpha1.NixBuildRequest{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      fmt.Sprintf("build-%s", session.ID),
+				Namespace: p.namespace,
+			},
+		}); err != nil {
+			log.Error().Err(err).Str("session_id", session.ID).Msg("Failed to cleanup build request")
+		}
+	}()
 
 	podIP, err := p.waitForBuilderPod(ctx, session)
 	if err != nil {
@@ -301,6 +326,52 @@ func (p *SSHProxy) createBuildRequest(ctx context.Context, session *ProxySession
 	}
 
 	log.Info().Str("session_id", session.ID).Msg("Created NixBuildRequest")
+	return nil
+}
+
+func (p *SSHProxy) ensureSSHKeySecret(ctx context.Context) error {
+	secretName := "nix-builder-keys"
+	publicKey := string(ssh.MarshalAuthorizedKey(p.clientKey.PublicKey()))
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      secretName,
+			Namespace: p.namespace,
+			Labels: map[string]string{
+				"app": "nix-builder",
+			},
+		},
+		StringData: map[string]string{
+			"authorized_keys": publicKey,
+		},
+	}
+
+	// Try to create the secret
+	if err := p.k8sClient.Create(ctx, secret); err != nil {
+		// If it already exists, update it
+		if client.IgnoreAlreadyExists(err) == nil {
+			// Get existing secret
+			var existingSecret corev1.Secret
+			if err := p.k8sClient.Get(ctx, client.ObjectKey{
+				Namespace: p.namespace,
+				Name:      secretName,
+			}, &existingSecret); err != nil {
+				return fmt.Errorf("failed to get existing secret: %w", err)
+			}
+
+			// Update it
+			existingSecret.StringData = secret.StringData
+			if err := p.k8sClient.Update(ctx, &existingSecret); err != nil {
+				return fmt.Errorf("failed to update SSH key secret: %w", err)
+			}
+			log.Info().Str("secret", secretName).Msg("Updated existing SSH key secret")
+		} else {
+			return fmt.Errorf("failed to create SSH key secret: %w", err)
+		}
+	} else {
+		log.Info().Str("secret", secretName).Msg("Created SSH key secret")
+	}
+
 	return nil
 }
 
@@ -339,6 +410,7 @@ func (p *SSHProxy) routeToBuilder(ctx context.Context, session *ProxySession, ch
 
 	builderConn, err := ssh.Dial("tcp", builderAddr, &ssh.ClientConfig{
 		User:            p.remoteUser,
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(p.clientKey)},
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // TODO: Proper host key validation
 		Timeout:         time.Second * 10,
 	})

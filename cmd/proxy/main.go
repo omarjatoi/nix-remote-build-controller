@@ -29,7 +29,7 @@ var rootCmd = &cobra.Command{
 		defer cancel()
 
 		addr := fmt.Sprintf(":%d", port)
-		sshProxy, err := proxy.NewSSHProxy(addr, hostKeyPath, namespace, remoteUser, remotePort, healthPort)
+		sshProxy, err := proxy.NewSSHProxy(ctx, addr, hostKeyPath, namespace, remoteUser, remotePort, healthPort)
 		if err != nil {
 			log.Fatal().Err(err).Msg("Failed to create SSH proxy")
 		}
