@@ -15,33 +15,34 @@ spec:
     spec:
       serviceAccountName: nix-remote-build-controller
       containers:
-      - name: controller
-        image: controller
-        imagePullPolicy: Always
-        args:
-        - --builder-image=builder
-        - --remote-port=22
-        - --health-port=8081
-        - --shutdown-timeout=30s
-        ports:
-        - containerPort: 8081
-          name: health
-        livenessProbe:
-          httpGet:
-            path: /healthz
-            port: 8081
-          initialDelaySeconds: 15
-          periodSeconds: 30
-        readinessProbe:
-          httpGet:
-            path: /readyz
-            port: 8081
-          initialDelaySeconds: 10
-          periodSeconds: 15
-        resources:
-          requests:
-            cpu: 100m
-            memory: 128Mi
-          limits:
-            cpu: 500m
-            memory: 512Mi
+        - name: controller
+          image: controller
+          imagePullPolicy: Always
+          args:
+            - --builder-image=ghcr.io/omarjatoi/nix-remote-build-controller/builder:latest
+            - --remote-port=22
+            - --nix-config=nix-builder-config
+            - --health-port=8081
+            - --shutdown-timeout=30s
+          ports:
+            - containerPort: 8081
+              name: health
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8081
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
