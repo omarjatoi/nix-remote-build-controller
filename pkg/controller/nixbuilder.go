@@ -171,6 +171,7 @@ func (r *NixBuildRequestReconciler) handleCompletedBuild(ctx context.Context, bu
 
 func (r *NixBuildRequestReconciler) createBuilderPod(buildReq *nixv1alpha1.NixBuildRequest) *corev1.Pod {
 	podName := fmt.Sprintf("nix-builder-%s", buildReq.Spec.SessionID)
+	secretName := "nix-builder-keys"
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -197,12 +198,27 @@ func (r *NixBuildRequestReconciler) createBuilderPod(buildReq *nixv1alpha1.NixBu
 			Containers: []corev1.Container{{
 				Name:    "nix-builder",
 				Image:   r.getBuilderImage(buildReq),
-				Command: []string{"/usr/sbin/sshd", "-D", "-e"},
+				Command: []string{"/bin/entrypoint.sh"},
 				Ports: []corev1.ContainerPort{{
 					ContainerPort: r.RemotePort,
 					Protocol:      corev1.ProtocolTCP,
 				}},
 				Resources: buildReq.Spec.Resources,
+				VolumeMounts: []corev1.VolumeMount{{
+					Name:      "ssh-keys",
+					MountPath: "/home/nixbld/.ssh/authorized_keys",
+					SubPath:   "authorized_keys",
+					ReadOnly:  true,
+				}},
+			}},
+			Volumes: []corev1.Volume{{
+				Name: "ssh-keys",
+				VolumeSource: corev1.VolumeSource{
+					Secret: &corev1.SecretVolumeSource{
+						SecretName:  secretName,
+						DefaultMode: &[]int32{0644}[0],
+					},
+				},
 			}},
 		},
 	}
