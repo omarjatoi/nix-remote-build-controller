@@ -87,7 +87,6 @@ func NewSSHProxy(ctx context.Context, addr, hostKeyPath, namespace, remoteUser s
 		return nil, fmt.Errorf("failed to listen on %s: %w", addr, err)
 	}
 
-	// Create Kubernetes client
 	scheme := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		return nil, fmt.Errorf("failed to add client-go scheme: %w", err)
@@ -124,7 +123,7 @@ func NewSSHProxy(ctx context.Context, addr, hostKeyPath, namespace, remoteUser s
 		return nil, fmt.Errorf("failed to start health server: %w", err)
 	}
 
-	if err := proxy.ensureSSHKeySecret(context.Background()); err != nil {
+	if err := proxy.ensureSSHKeySecret(ctx); err != nil {
 		return nil, fmt.Errorf("failed to ensure SSH key secret: %w", err)
 	}
 
@@ -346,11 +345,8 @@ func (p *SSHProxy) ensureSSHKeySecret(ctx context.Context) error {
 		},
 	}
 
-	// Try to create the secret
 	if err := p.k8sClient.Create(ctx, secret); err != nil {
-		// If it already exists, update it
 		if client.IgnoreAlreadyExists(err) == nil {
-			// Get existing secret
 			var existingSecret corev1.Secret
 			if err := p.k8sClient.Get(ctx, client.ObjectKey{
 				Namespace: p.namespace,
@@ -359,7 +355,6 @@ func (p *SSHProxy) ensureSSHKeySecret(ctx context.Context) error {
 				return fmt.Errorf("failed to get existing secret: %w", err)
 			}
 
-			// Update it
 			existingSecret.StringData = secret.StringData
 			if err := p.k8sClient.Update(ctx, &existingSecret); err != nil {
 				return fmt.Errorf("failed to update SSH key secret: %w", err)
