@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nix-builder-config
+  namespace: default
+data:
+  nix.conf: |
+    sandbox = false
+    trusted-users = root nixbld
+    experimental-features = nix-command flakes

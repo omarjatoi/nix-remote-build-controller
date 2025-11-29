@@ -72,8 +72,39 @@
               imageDigest = "sha256:0e6ade350a4d86d76dd4046a654ccbbb58d14fe93b6e3deef42c1d0fd9db3849";
               sha256 = "sha256-zdGBgjbw+Z8iP5hu5oCkehO6L/VFlWmUiGsB4Y2z6i0=";
             };
+            contents = [
+              pkgs.openssh
+              pkgs.shadow
+            ];
+            runAsRoot = ''
+              #!${pkgs.runtimeShell}
+              mkdir -p /etc/ssh /var/empty
+              ${pkgs.shadow}/bin/useradd -m -s /bin/sh nixbld
+              mkdir -p /home/nixbld/.ssh
+              chown nixbld:nixbld /home/nixbld/.ssh
+              chmod 700 /home/nixbld/.ssh
+              ${pkgs.openssh}/bin/ssh-keygen -A
+
+              # Create entrypoint script
+              cat > /bin/entrypoint.sh <<EOF
+              #!${pkgs.runtimeShell}
+              # Start nix-daemon in the background
+              ${pkgs.nix}/bin/nix-daemon &
+
+              # Wait for daemon to be ready
+              sleep 1
+
+              # Start SSHD
+              exec ${pkgs.openssh}/bin/sshd -D -e
+              EOF
+              chmod +x /bin/entrypoint.sh
+
+              # Ensure nix binaries are in path
+              ln -sf ${pkgs.nix}/bin/nix* /bin/
+            '';
             config = {
-              Cmd = [ "sh" "-c" "nix-env -iA nixpkgs.openssh && adduser -D nixbld && ssh-keygen -A && exec sshd -D" ];
+              Cmd = [ "/bin/entrypoint.sh" ];
+              Env = [ "PATH=/bin:/usr/bin" ];
               ExposedPorts = {
                 "22/tcp" = { };
               };
