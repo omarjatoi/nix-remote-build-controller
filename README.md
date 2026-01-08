@@ -1,3 +1,6 @@
+> [!WARNING]  
+> This project is incomplete and not currently in working condition.
+
 # nix-remote-build-controller
 
 Kubernetes controller enabling dynamically scaling Nix remote builders with an SSH proxy.
