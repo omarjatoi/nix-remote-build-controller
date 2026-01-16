@@ -33,3 +33,5 @@ go.work.sum
 
 result
 .direnv
+
+.DS_Store
