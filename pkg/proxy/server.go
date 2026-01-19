@@ -433,7 +433,7 @@ func (p *SSHProxy) routeToBuilder(ctx context.Context, session *ProxySession, ch
 	builderConn, err := ssh.Dial("tcp", builderAddr, &ssh.ClientConfig{
 		User:            p.remoteUser,
 		Auth:            []ssh.AuthMethod{ssh.PublicKeys(p.clientKey)},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // TODO: Proper host key validation
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 		Timeout:         time.Second * 10,
 	})
 	if err != nil {
@@ -449,29 +449,44 @@ func (p *SSHProxy) routeToBuilder(ctx context.Context, session *ProxySession, ch
 
 	log.Info().Str("session_id", session.ID).Str("builder_addr", builderAddr).Msg("Connected to builder pod")
 
+	tunnelCtx, tunnelCancel := context.WithCancel(ctx)
+	defer tunnelCancel()
+
 	var wg sync.WaitGroup
+
+	errChan := make(chan error, 4)
+
+	go func() {
+		<-tunnelCtx.Done()
+		channel.Close()
+		builderChannel.Close()
+	}()
 
 	// Forward requests: client -> builder
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		p.forwardRequests(ctx, requests, builderChannel, session.ID, "client->builder")
+		p.forwardRequests(tunnelCtx, requests, builderChannel, session.ID, "client->builder")
 	}()
 
 	// Forward requests: builder -> client
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		p.forwardRequests(ctx, builderRequests, channel, session.ID, "builder->client")
+		p.forwardRequests(tunnelCtx, builderRequests, channel, session.ID, "builder->client")
 	}()
 
 	// Forward data: client -> builder
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		defer tunnelCancel()
 		_, err := io.Copy(builderChannel, channel)
-		if err != nil && err != io.EOF {
-			log.Debug().Err(err).Str("session_id", session.ID).Msg("Client -> builder channel ended")
+		if err != nil && err != io.EOF && tunnelCtx.Err() == nil {
+			errChan <- fmt.Errorf("client->builder copy: %w", err)
+		}
+		if cw, ok := builderChannel.(interface{ CloseWrite() error }); ok {
+			cw.CloseWrite()
 		}
 	}()
 
@@ -479,17 +494,27 @@ func (p *SSHProxy) routeToBuilder(ctx context.Context, session *ProxySession, ch
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		defer tunnelCancel()
 		_, err := io.Copy(channel, builderChannel)
-		if err != nil && err != io.EOF {
-			log.Debug().Err(err).Str("session_id", session.ID).Msg("Builder -> client channel ended")
+		if err != nil && err != io.EOF && tunnelCtx.Err() == nil {
+			errChan <- fmt.Errorf("builder->client copy: %w", err)
+		}
+		if cw, ok := channel.(interface{ CloseWrite() error }); ok {
+			cw.CloseWrite()
 		}
 	}()
 
 	wg.Wait()
 
-	log.Info().Str("session_id", session.ID).Str("builder_addr", builderAddr).Msg("Completed build request")
-
-	return nil
+	// Check for errors (non-blocking)
+	select {
+	case err := <-errChan:
+		log.Debug().Str("session_id", session.ID).Err(err).Msg("Build session ended with error")
+		return err
+	default:
+		log.Info().Str("session_id", session.ID).Str("builder_addr", builderAddr).Msg("Build session completed successfully")
+		return nil
+	}
 }
 
 func (p *SSHProxy) forwardRequests(ctx context.Context, src <-chan *ssh.Request, dst ssh.Channel, sessionID, direction string) {
@@ -507,18 +532,24 @@ func (p *SSHProxy) forwardRequests(ctx context.Context, src <-chan *ssh.Request,
 				Str("request_type", req.Type).
 				Str("direction", direction).
 				Bool("want_reply", req.WantReply).
-				Msg("Forwarding SSH request transparently")
+				Msg("Forwarding SSH request")
 
 			accepted, err := dst.SendRequest(req.Type, req.WantReply, req.Payload)
 			if err != nil {
-				log.Error().
+				log.Debug().
 					Err(err).
 					Str("session_id", sessionID).
 					Str("request_type", req.Type).
 					Str("direction", direction).
-					Msg("SSH request forwarding failed")
+					Msg("Request forward failed")
+				if req.WantReply {
+					req.Reply(false, nil)
+				}
+				continue
 			}
-			req.Reply(accepted && err == nil, nil)
+			if req.WantReply {
+				req.Reply(accepted, nil)
+			}
 		}
 	}
 }
