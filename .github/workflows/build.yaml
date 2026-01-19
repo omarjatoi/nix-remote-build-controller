@@ -14,11 +14,12 @@ jobs:
     strategy:
       matrix:
         image: [controller, proxy, builder]
+        arch: [x86_64, aarch64]
         include:
-          - runner: ubuntu-latest
-            arch: x86_64
-          - runner: ubuntu-24.04-arm
-            arch: aarch64
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     permissions:
       id-token: write
