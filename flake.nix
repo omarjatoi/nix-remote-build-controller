@@ -83,7 +83,14 @@
               mkdir -p /home/nixbld/.ssh
               chown nixbld:nixbld /home/nixbld/.ssh
               chmod 700 /home/nixbld/.ssh
-              ${pkgs.openssh}/bin/ssh-keygen -A
+              ${pkgs.openssh}/bin/ssh-keygen -t ed25519 -f /etc/ssh/ssh_host_ed25519_key -N ""
+
+              cat > /etc/ssh/sshd_config <<SSHD_CONFIG
+              HostKey /etc/ssh/ssh_host_ed25519_key
+              AuthorizedKeysFile /home/nixbld/.ssh/authorized_keys
+              PasswordAuthentication no
+              AllowUsers nixbld
+              SSHD_CONFIG
 
               # Create entrypoint script
               cat > /bin/entrypoint.sh <<EOF
