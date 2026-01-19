@@ -60,7 +60,7 @@
             tag = "latest";
             contents = [ self.packages.${system}.proxy ];
             config = {
-              Cmd = [ "${self.packages.${system}.proxy}/bin/proxy" ];
+              Entrypoint = [ "${self.packages.${system}.proxy}/bin/proxy" ];
             };
           };
 
