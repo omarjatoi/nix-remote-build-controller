@@ -23,6 +23,7 @@ type NixBuildRequestReconciler struct {
 	BuilderImage string
 	RemotePort   int32
 	NixConfigMap string
+	SSHKeySecret string
 }
 
 // Reconcile handles NixBuildRequest events
@@ -149,15 +150,10 @@ func (r *NixBuildRequestReconciler) handleRunningBuild(ctx context.Context, buil
 		return r.updateStatus(ctx, buildReq)
 	}
 
-	// Pod is still running, proxy is using it. Requeue to keep watching for failures.
 	return ctrl.Result{RequeueAfter: time.Second * 30}, nil
 }
 
 func (r *NixBuildRequestReconciler) handleCompletedBuild(ctx context.Context, buildReq *nixv1alpha1.NixBuildRequest) (ctrl.Result, error) {
-	// Completed/Failed builds are waiting for deletion by the proxy.
-	// The finalizer will handle pod cleanup when that happens.
-	// This state should be transient - the proxy deletes the NixBuildRequest
-	// immediately after updating the status.
 	log.Debug().
 		Str("session_id", buildReq.Spec.SessionID).
 		Str("phase", string(buildReq.Status.Phase)).
@@ -167,7 +163,6 @@ func (r *NixBuildRequestReconciler) handleCompletedBuild(ctx context.Context, bu
 
 func (r *NixBuildRequestReconciler) createBuilderPod(buildReq *nixv1alpha1.NixBuildRequest) *corev1.Pod {
 	podName := fmt.Sprintf("nix-builder-%s", buildReq.Spec.SessionID)
-	secretName := "nix-builder-keys"
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -203,7 +198,7 @@ func (r *NixBuildRequestReconciler) createBuilderPod(buildReq *nixv1alpha1.NixBu
 				VolumeMounts: []corev1.VolumeMount{{
 					Name:      "ssh-keys",
 					MountPath: "/home/nixbld/.ssh/authorized_keys",
-					SubPath:   "authorized_keys",
+					SubPath:   "public",
 					ReadOnly:  true,
 				}},
 			}},
@@ -211,7 +206,7 @@ func (r *NixBuildRequestReconciler) createBuilderPod(buildReq *nixv1alpha1.NixBu
 				Name: "ssh-keys",
 				VolumeSource: corev1.VolumeSource{
 					Secret: &corev1.SecretVolumeSource{
-						SecretName:  secretName,
+						SecretName:  r.SSHKeySecret,
 						DefaultMode: &[]int32{0644}[0],
 					},
 				},

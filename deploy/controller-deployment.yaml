@@ -22,6 +22,7 @@ spec:
             - --builder-image=ghcr.io/omarjatoi/nix-remote-build-controller/builder:latest
             - --remote-port=22
             - --nix-config=nix-builder-config
+            - --ssh-key-secret=nix-builder-ssh-keys
             - --health-port=8081
             - --shutdown-timeout=30s
           ports:

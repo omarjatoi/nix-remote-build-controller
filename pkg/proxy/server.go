@@ -27,6 +27,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 )
 
+const (
+	// SSHKeySecretPrivateKey is the key in the secret containing the private key
+	SSHKeySecretPrivateKey = "private"
+	// SSHKeySecretPublicKey is the key in the secret containing the public key (authorized_keys)
+	SSHKeySecretPublicKey = "public"
+)
+
 type SSHProxy struct {
 	listener     net.Listener
 	hostKey      ssh.Signer
@@ -59,7 +66,7 @@ const (
 	SessionClosed
 )
 
-func NewSSHProxy(ctx context.Context, addr, hostKeyPath, namespace, remoteUser string, remotePort int32, healthPort int) (*SSHProxy, error) {
+func NewSSHProxy(ctx context.Context, addr, hostKeyPath, namespace, remoteUser string, remotePort int32, healthPort int, sshKeySecret string) (*SSHProxy, error) {
 	var hostKey ssh.Signer
 	var err error
 
@@ -75,11 +82,6 @@ func NewSSHProxy(ctx context.Context, addr, hostKeyPath, namespace, remoteUser s
 		if err != nil {
 			return nil, fmt.Errorf("failed to generate host key: %w", err)
 		}
-	}
-
-	clientKey, err := generateHostKey()
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate client key: %w", err)
 	}
 
 	listener, err := net.Listen("tcp", addr)
@@ -107,6 +109,13 @@ func NewSSHProxy(ctx context.Context, addr, hostKeyPath, namespace, remoteUser s
 		return nil, fmt.Errorf("failed to create Kubernetes client: %w", err)
 	}
 
+	// Load client key from user-provided secret
+	clientKey, err := loadClientKeyFromSecret(ctx, k8sClient, namespace, sshKeySecret)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load client key from secret %s: %w", sshKeySecret, err)
+	}
+	log.Info().Str("secret", sshKeySecret).Msg("Loaded SSH client key from secret")
+
 	proxy := &SSHProxy{
 		listener:     listener,
 		hostKey:      hostKey,
@@ -123,12 +132,32 @@ func NewSSHProxy(ctx context.Context, addr, hostKeyPath, namespace, remoteUser s
 		return nil, fmt.Errorf("failed to start health server: %w", err)
 	}
 
-	if err := proxy.ensureSSHKeySecret(ctx); err != nil {
-		return nil, fmt.Errorf("failed to ensure SSH key secret: %w", err)
-	}
-
 	log.Info().Str("address", addr).Msg("SSH proxy listening")
 	return proxy, nil
+}
+
+// loadClientKeyFromSecret loads the SSH private key from a Kubernetes secret.
+// The secret must contain a key named "id_rsa" with the private key in PEM format.
+func loadClientKeyFromSecret(ctx context.Context, k8sClient client.Client, namespace, secretName string) (ssh.Signer, error) {
+	var secret corev1.Secret
+	if err := k8sClient.Get(ctx, client.ObjectKey{
+		Namespace: namespace,
+		Name:      secretName,
+	}, &secret); err != nil {
+		return nil, fmt.Errorf("failed to get secret: %w", err)
+	}
+
+	privateKeyBytes, ok := secret.Data[SSHKeySecretPrivateKey]
+	if !ok {
+		return nil, fmt.Errorf("secret %s missing required key '%s'", secretName, SSHKeySecretPrivateKey)
+	}
+
+	signer, err := ssh.ParsePrivateKey(privateKeyBytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse private key: %w", err)
+	}
+
+	return signer, nil
 }
 
 func (p *SSHProxy) Start(ctx context.Context) error {
@@ -342,7 +371,6 @@ func (p *SSHProxy) completeBuildRequest(sessionID string, succeeded bool, buildE
 		return
 	}
 
-	// Update status
 	now := metav1.Now()
 	if succeeded {
 		buildReq.Status.Phase = v1alpha1.BuildPhaseCompleted
@@ -361,7 +389,6 @@ func (p *SSHProxy) completeBuildRequest(sessionID string, succeeded bool, buildE
 		log.Error().Err(err).Str("session_id", sessionID).Msg("Failed to update build request status")
 	}
 
-	// Delete the build request (finalizer will clean up pod)
 	if err := p.k8sClient.Delete(ctx, &buildReq); err != nil {
 		log.Error().Err(err).Str("session_id", sessionID).Msg("Failed to delete build request")
 	}
@@ -370,48 +397,6 @@ func (p *SSHProxy) completeBuildRequest(sessionID string, succeeded bool, buildE
 		Str("session_id", sessionID).
 		Bool("succeeded", succeeded).
 		Msg("Build request completed and marked for deletion")
-}
-
-func (p *SSHProxy) ensureSSHKeySecret(ctx context.Context) error {
-	secretName := "nix-builder-keys"
-	publicKey := string(ssh.MarshalAuthorizedKey(p.clientKey.PublicKey()))
-
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      secretName,
-			Namespace: p.namespace,
-			Labels: map[string]string{
-				"app": "nix-builder",
-			},
-		},
-		StringData: map[string]string{
-			"authorized_keys": publicKey,
-		},
-	}
-
-	if err := p.k8sClient.Create(ctx, secret); err != nil {
-		if client.IgnoreAlreadyExists(err) == nil {
-			var existingSecret corev1.Secret
-			if err := p.k8sClient.Get(ctx, client.ObjectKey{
-				Namespace: p.namespace,
-				Name:      secretName,
-			}, &existingSecret); err != nil {
-				return fmt.Errorf("failed to get existing secret: %w", err)
-			}
-
-			existingSecret.StringData = secret.StringData
-			if err := p.k8sClient.Update(ctx, &existingSecret); err != nil {
-				return fmt.Errorf("failed to update SSH key secret: %w", err)
-			}
-			log.Info().Str("secret", secretName).Msg("Updated existing SSH key secret")
-		} else {
-			return fmt.Errorf("failed to create SSH key secret: %w", err)
-		}
-	} else {
-		log.Info().Str("secret", secretName).Msg("Created SSH key secret")
-	}
-
-	return nil
 }
 
 func (p *SSHProxy) waitForBuilderPod(ctx context.Context, session *ProxySession) (string, error) {

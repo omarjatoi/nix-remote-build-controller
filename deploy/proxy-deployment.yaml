@@ -6,10 +6,10 @@ metadata:
 spec:
   type: LoadBalancer
   ports:
-  - port: 22
-    targetPort: 2222
-    protocol: TCP
-    name: ssh
+    - port: 22
+      targetPort: 2222
+      protocol: TCP
+      name: ssh
   selector:
     component: proxy
 ---
@@ -30,36 +30,37 @@ spec:
     spec:
       serviceAccountName: nix-remote-build-controller
       containers:
-      - name: proxy
-        image: proxy
-        imagePullPolicy: Always
-        args:
-        - --port=2222
-        - --health-port=8080
-        - --namespace=default
-        - --remote-user=nixbld
-        - --remote-port=22
-        ports:
-        - containerPort: 2222
-          name: ssh
-        - containerPort: 8080
-          name: health
-        livenessProbe:
-          httpGet:
-            path: /healthz
-            port: 8080
-          initialDelaySeconds: 10
-          periodSeconds: 30
-        readinessProbe:
-          httpGet:
-            path: /readyz
-            port: 8080
-          initialDelaySeconds: 5
-          periodSeconds: 10
-        resources:
-          requests:
-            cpu: 100m
-            memory: 128Mi
-          limits:
-            cpu: 500m
-            memory: 512Mi
+        - name: proxy
+          image: proxy
+          imagePullPolicy: Always
+          args:
+            - --port=2222
+            - --health-port=8080
+            - --namespace=default
+            - --remote-user=nixbld
+            - --remote-port=22
+            - --ssh-key-secret=nix-builder-ssh-keys
+          ports:
+            - containerPort: 2222
+              name: ssh
+            - containerPort: 8080
+              name: health
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi

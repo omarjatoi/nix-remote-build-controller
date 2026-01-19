@@ -24,6 +24,7 @@ var (
 	builderImage    string
 	remotePort      int32
 	nixConfigMap    string
+	sshKeySecret    string
 	healthPort      int
 	shutdownTimeout time.Duration
 )
@@ -62,6 +63,7 @@ var rootCmd = &cobra.Command{
 			BuilderImage: builderImage,
 			RemotePort:   remotePort,
 			NixConfigMap: nixConfigMap,
+			SSHKeySecret: sshKeySecret,
 		}
 
 		if err := reconciler.SetupWithManager(mgr); err != nil {
@@ -78,6 +80,7 @@ var rootCmd = &cobra.Command{
 			Str("builder_image", builderImage).
 			Int32("remote_port", remotePort).
 			Str("nix_config", nixConfigMap).
+			Str("ssh_key_secret", sshKeySecret).
 			Int("health_port", healthPort).
 			Dur("shutdown_timeout", shutdownTimeout).
 			Msg("Starting Nix remote builder controller")
@@ -168,6 +171,7 @@ func init() {
 	rootCmd.Flags().StringVar(&builderImage, "builder-image", "nixos/nix:latest", "Builder container image")
 	rootCmd.Flags().Int32Var(&remotePort, "remote-port", 22, "SSH port in builder pods")
 	rootCmd.Flags().StringVar(&nixConfigMap, "nix-config", "", "ConfigMap containing nix.conf (optional)")
+	rootCmd.Flags().StringVar(&sshKeySecret, "ssh-key-secret", "nix-builder-ssh-keys", "Secret containing SSH keypair for builder authentication (must contain 'private' and 'public' keys)")
 	rootCmd.Flags().IntVar(&healthPort, "health-port", 8081, "Health check server port")
 	rootCmd.Flags().DurationVar(&shutdownTimeout, "shutdown-timeout", 30*time.Second, "Graceful shutdown timeout")
 	rootCmd.AddCommand(versionCmd)
