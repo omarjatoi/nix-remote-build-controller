@@ -506,7 +506,6 @@ func (p *SSHProxy) routeToBuilder(ctx context.Context, session *ProxySession, ch
 
 	wg.Wait()
 
-	// Check for errors (non-blocking)
 	select {
 	case err := <-errChan:
 		log.Debug().Str("session_id", session.ID).Err(err).Msg("Build session ended with error")
