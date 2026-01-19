@@ -51,7 +51,7 @@
             tag = "latest";
             contents = [ self.packages.${system}.controller ];
             config = {
-              Cmd = [ "${self.packages.${system}.controller}/bin/controller" ];
+              Entrypoint = [ "${self.packages.${system}.controller}/bin/controller" ];
             };
           };
 
