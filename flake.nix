@@ -17,101 +17,104 @@
       let
         pkgs = nixpkgs.legacyPackages.${system};
         version = "0.1.0";
+
+        # Build a Go binary for a given pkgs set
+        buildGoApp =
+          goPkgs: name:
+          goPkgs.buildGoModule {
+            pname = name;
+            inherit version;
+            src = ./.;
+            vendorHash = "sha256-Ua6i6574AG84UsyAIj/KL5yc0+4BVVy1eR+N98qpUkQ=";
+            subPackages = [ "cmd/${name}" ];
+            CGO_ENABLED = 0;
+            ldflags = [
+              "-s"
+              "-w"
+              "-X main.version=${version}"
+            ];
+          };
+
+        # Build a container image for a given app
+        buildImage =
+          imgPkgs: name: app:
+          imgPkgs.dockerTools.buildImage {
+            name = "ghcr.io/omarjatoi/nix-remote-build-controller/${name}";
+            tag = "latest";
+            contents = [ app ];
+            config = {
+              Entrypoint = [ "${app}/bin/${name}" ];
+            };
+          };
       in
       {
         packages = {
-          controller = pkgs.buildGoModule {
-            pname = "controller";
-            inherit version;
-            src = ./.;
-            vendorHash = "sha256-Ua6i6574AG84UsyAIj/KL5yc0+4BVVy1eR+N98qpUkQ=";
-            subPackages = [ "cmd/controller" ];
-            ldflags = [
-              "-s"
-              "-w"
-              "-X main.version=${version}"
-            ];
-          };
+          # Native binaries for local development
+          controller = buildGoApp pkgs "controller";
+          proxy = buildGoApp pkgs "proxy";
 
-          proxy = pkgs.buildGoModule {
-            pname = "proxy";
-            inherit version;
-            src = ./.;
-            vendorHash = "sha256-Ua6i6574AG84UsyAIj/KL5yc0+4BVVy1eR+N98qpUkQ=";
-            subPackages = [ "cmd/proxy" ];
-            ldflags = [
-              "-s"
-              "-w"
-              "-X main.version=${version}"
-            ];
-          };
+          # Container images (uses current system's pkgs - works on Linux runners)
+          controller-image = buildImage pkgs "controller" self.packages.${system}.controller;
+          proxy-image = buildImage pkgs "proxy" self.packages.${system}.proxy;
 
-          controller-image = pkgs.dockerTools.buildImage {
-            name = "ghcr.io/omarjatoi/nix-remote-build-controller/controller";
-            tag = "latest";
-            contents = [ self.packages.${system}.controller ];
-            config = {
-              Entrypoint = [ "${self.packages.${system}.controller}/bin/controller" ];
-            };
-          };
+          # Entrypoint script for builder container - runs setup at container start
+          builder-entrypoint = pkgs.writeShellScriptBin "entrypoint" ''
+            set -e
 
-          proxy-image = pkgs.dockerTools.buildImage {
-            name = "ghcr.io/omarjatoi/nix-remote-build-controller/proxy";
-            tag = "latest";
-            contents = [ self.packages.${system}.proxy ];
-            config = {
-              Entrypoint = [ "${self.packages.${system}.proxy}/bin/proxy" ];
-            };
-          };
+            # Create necessary directories
+            mkdir -p /etc/ssh /var/empty /home/nixbld/.ssh
+
+            # Create nixbld user if it doesn't exist
+            if ! id nixbld &>/dev/null; then
+              echo "nixbld:x:1000:1000:Nix Build User:/home/nixbld:/bin/sh" >> /etc/passwd
+              echo "nixbld:x:1000:" >> /etc/group
+            fi
+
+            # Generate host key if needed
+            if [ ! -f /etc/ssh/ssh_host_ed25519_key ]; then
+              ${pkgs.openssh}/bin/ssh-keygen -t ed25519 -f /etc/ssh/ssh_host_ed25519_key -N ""
+            fi
+
+            # Set up SSH config
+            cat > /etc/ssh/sshd_config <<SSHD_CONFIG
+            HostKey /etc/ssh/ssh_host_ed25519_key
+            AuthorizedKeysFile /home/nixbld/.ssh/authorized_keys
+            PasswordAuthentication no
+            AllowUsers nixbld
+            SSHD_CONFIG
+
+            # Fix permissions
+            chown -R nixbld:nixbld /home/nixbld
+            chmod 700 /home/nixbld/.ssh
+
+            # Start nix-daemon in the background
+            ${pkgs.nix}/bin/nix-daemon &
+            sleep 1
+
+            # Start SSHD
+            exec ${pkgs.openssh}/bin/sshd -D -e
+          '';
 
           builder-image = pkgs.dockerTools.buildImage {
             name = "ghcr.io/omarjatoi/nix-remote-build-controller/builder";
             tag = "latest";
-            fromImage = pkgs.dockerTools.pullImage {
-              imageName = "nixos/nix";
-              imageDigest = "sha256:0e6ade350a4d86d76dd4046a654ccbbb58d14fe93b6e3deef42c1d0fd9db3849";
-              sha256 = "sha256-zdGBgjbw+Z8iP5hu5oCkehO6L/VFlWmUiGsB4Y2z6i0=";
+            copyToRoot = pkgs.buildEnv {
+              name = "builder-root";
+              paths = [
+                pkgs.nix
+                pkgs.openssh
+                pkgs.coreutils
+                pkgs.bashInteractive
+                self.packages.${system}.builder-entrypoint
+              ];
+              pathsToLink = [ "/bin" "/etc" "/share" ];
             };
-            contents = [
-              pkgs.openssh
-              pkgs.shadow
-            ];
-            runAsRoot = ''
-              #!${pkgs.runtimeShell}
-              mkdir -p /etc/ssh /var/empty
-              ${pkgs.shadow}/bin/useradd -m -s /bin/sh nixbld
-              mkdir -p /home/nixbld/.ssh
-              chown nixbld:nixbld /home/nixbld/.ssh
-              chmod 700 /home/nixbld/.ssh
-              ${pkgs.openssh}/bin/ssh-keygen -t ed25519 -f /etc/ssh/ssh_host_ed25519_key -N ""
-
-              cat > /etc/ssh/sshd_config <<SSHD_CONFIG
-              HostKey /etc/ssh/ssh_host_ed25519_key
-              AuthorizedKeysFile /home/nixbld/.ssh/authorized_keys
-              PasswordAuthentication no
-              AllowUsers nixbld
-              SSHD_CONFIG
-
-              # Create entrypoint script
-              cat > /bin/entrypoint.sh <<EOF
-              #!${pkgs.runtimeShell}
-              # Start nix-daemon in the background
-              ${pkgs.nix}/bin/nix-daemon &
-
-              # Wait for daemon to be ready
-              sleep 1
-
-              # Start SSHD
-              exec ${pkgs.openssh}/bin/sshd -D -e
-              EOF
-              chmod +x /bin/entrypoint.sh
-
-              # Ensure nix binaries are in path
-              ln -sf ${pkgs.nix}/bin/nix* /bin/
-            '';
             config = {
-              Cmd = [ "/bin/entrypoint.sh" ];
-              Env = [ "PATH=/bin:/usr/bin" ];
+              Entrypoint = [ "${self.packages.${system}.builder-entrypoint}/bin/entrypoint" ];
+              Env = [
+                "PATH=/bin"
+                "NIX_SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+              ];
               ExposedPorts = {
                 "22/tcp" = { };
               };

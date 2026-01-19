@@ -11,32 +11,55 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        image: [controller, proxy, builder]
+        include:
+          - runner: ubuntu-latest
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
     permissions:
       id-token: write
       contents: read
       packages: write
-    strategy:
-      matrix:
-        image: [controller, proxy, builder]
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
+      - uses: actions/checkout@v4
       - uses: DeterminateSystems/determinate-nix-action@v3
       - uses: DeterminateSystems/flakehub-cache-action@main
 
-      - name: Log in to Container Registry
-        uses: docker/login-action@v3
+      - uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build ${{ matrix.image }} image
-        run: nix build .#${{ matrix.image }}-image
-
-      - name: Load and push ${{ matrix.image }} image
+      - name: Build and push ${{ matrix.image }} (${{ matrix.arch }})
         run: |
+          nix build .#${{ matrix.image }}-image
           docker load < result
-          docker push ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.image }}:latest
+          docker push ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.image }}:${{ matrix.arch }}
+
+  manifest:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    permissions:
+      packages: write
+    strategy:
+      matrix:
+        image: [controller, proxy, builder]
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create multi-arch manifest
+        run: |
+          docker manifest create ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.image }}:latest \
+            --amend ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.image }}:amd64 \
+            --amend ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.image }}:arm64
+          docker manifest push ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.image }}:latest
