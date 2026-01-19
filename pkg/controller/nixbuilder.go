@@ -105,8 +105,21 @@ func (r *NixBuildRequestReconciler) handleCreatingBuild(ctx context.Context, bui
 		Namespace: buildReq.Namespace,
 		Name:      buildReq.Status.PodName,
 	}, &pod); err != nil {
+		if client.IgnoreNotFound(err) == nil {
+			buildReq.Status.Phase = nixv1alpha1.BuildPhaseFailed
+			buildReq.Status.CompletionTime = &metav1.Time{Time: time.Now()}
+			buildReq.Status.Message = "Builder pod was deleted during creation"
+			return r.updateStatus(ctx, buildReq)
+		}
 		log.Error().Err(err).Str("session_id", buildReq.Spec.SessionID).Msg("Failed to get builder pod")
 		return ctrl.Result{}, err
+	}
+
+	if pod.Status.Phase == corev1.PodFailed {
+		buildReq.Status.Phase = nixv1alpha1.BuildPhaseFailed
+		buildReq.Status.CompletionTime = &metav1.Time{Time: time.Now()}
+		buildReq.Status.Message = fmt.Sprintf("Builder pod failed during creation: %s", pod.Status.Message)
+		return r.updateStatus(ctx, buildReq)
 	}
 
 	if pod.Status.Phase == corev1.PodRunning && pod.Status.PodIP != "" {
