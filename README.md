@@ -27,14 +27,10 @@ kubectl create secret generic nix-builder-ssh-keys \
 
 ### Deploying the Controller and Proxy
 
-Deploy components to the cluster using Kustomize, selecting the appropriate architecture overlay:
+Deploy components to the cluster using Kustomize:
 
 ```sh
-# For ARM64 clusters (e.g., Apple Silicon, AWS Graviton)
-kubectl apply -k deploy/overlays/aarch64
-
-# For x86_64 clusters
-kubectl apply -k deploy/overlays/x86_64
+kubectl apply -k deploy
 ```
 
 ### Configuring Your Nix Client
@@ -169,11 +165,11 @@ Phases: `Pending` → `Creating` → `Running` → `Completed`/`Failed`
 
 ### Customizing Builder Resources
 
-Edit `deploy/base/controller-deployment.yaml` to set default resource requests/limits, or configure them per-build through the CRD spec.
+Edit `deploy/controller-deployment.yaml` to set default resource requests/limits, or configure them per-build through the CRD spec.
 
 ### Customizing Nix Configuration
 
-Edit `deploy/base/nix-config.yaml` to modify the `nix.conf` mounted in builder pods:
+Edit `deploy/nix-config.yaml` to modify the `nix.conf` mounted in builder pods:
 
 ```yaml
 data:
