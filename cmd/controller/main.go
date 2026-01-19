@@ -74,28 +74,6 @@ var rootCmd = &cobra.Command{
 			log.Fatal().Err(err).Msg("Failed to setup health checks")
 		}
 
-		// Setup graceful shutdown handler
-		go func() {
-			<-ctx.Done() // Signal received
-
-			// Mark as shutting down immediately
-			shuttingDown.Store(true)
-			log.Info().Dur("timeout", shutdownTimeout).Msg("Shutdown signal received, starting graceful shutdown")
-
-			// Start resource cleanup
-			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), shutdownTimeout/2)
-			defer cleanupCancel()
-
-			if err := reconciler.GracefulShutdown(cleanupCtx); err != nil {
-				log.Error().Err(err).Msg("Graceful shutdown cleanup failed")
-			}
-
-			// Give controller remaining time to finish
-			time.Sleep(shutdownTimeout / 2)
-
-			log.Fatal().Msg("Graceful shutdown timeout exceeded, forcing exit")
-		}()
-
 		log.Info().
 			Str("builder_image", builderImage).
 			Int32("remote_port", remotePort).
@@ -105,12 +83,39 @@ var rootCmd = &cobra.Command{
 			Msg("Starting Nix remote builder controller")
 
 		log.Info().Msg("Controller manager starting...")
-		if err := mgr.Start(ctx); err != nil {
-			if err == context.Canceled {
-				log.Info().Msg("Controller manager stopped gracefully")
-			} else {
-				log.Fatal().Err(err).Msg("Controller manager failed")
+
+		mgrDone := make(chan error, 1)
+		go func() {
+			mgrDone <- mgr.Start(ctx)
+		}()
+
+		err = <-mgrDone
+
+		if ctx.Err() != nil {
+			shuttingDown.Store(true)
+			log.Info().Dur("timeout", shutdownTimeout).Msg("Shutdown signal received, starting graceful shutdown")
+
+			cleanupDone := make(chan struct{})
+			go func() {
+				cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), shutdownTimeout)
+				defer cleanupCancel()
+
+				if err := reconciler.GracefulShutdown(cleanupCtx); err != nil {
+					log.Error().Err(err).Msg("Graceful shutdown cleanup failed")
+				}
+				close(cleanupDone)
+			}()
+
+			select {
+			case <-cleanupDone:
+				log.Info().Msg("Graceful shutdown completed successfully")
+			case <-time.After(shutdownTimeout):
+				log.Fatal().Msg("Graceful shutdown timeout exceeded, forcing exit")
 			}
+		} else if err != nil {
+			log.Fatal().Err(err).Msg("Controller manager failed")
+		} else {
+			log.Info().Msg("Controller manager stopped")
 		}
 	},
 }
