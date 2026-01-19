@@ -1,0 +1,16 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: controller
+spec:
+  template:
+    spec:
+      containers:
+        - name: controller
+          args:
+            - --builder-image=ghcr.io/omarjatoi/nix-remote-build-controller/builder-aarch64:latest
+            - --remote-port=22
+            - --nix-config=nix-builder-config
+            - --ssh-key-secret=nix-builder-ssh-keys
+            - --health-port=8081
+            - --shutdown-timeout=30s

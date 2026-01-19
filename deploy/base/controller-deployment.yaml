@@ -19,7 +19,7 @@ spec:
           image: controller
           imagePullPolicy: Always
           args:
-            - --builder-image=ghcr.io/omarjatoi/nix-remote-build-controller/builder:latest
+            - --builder-image=builder:latest
             - --remote-port=22
             - --nix-config=nix-builder-config
             - --ssh-key-secret=nix-builder-ssh-keys
