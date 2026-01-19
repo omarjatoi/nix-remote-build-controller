@@ -283,29 +283,28 @@ func (p *SSHProxy) handleChannel(ctx context.Context, session *ProxySession, new
 		log.Error().Err(err).Str("session_id", session.ID).Msg("Failed to create build request")
 		return
 	}
+
+	// Track build outcome for cleanup
+	var buildSucceeded bool
+	var buildError error
+
 	defer func() {
-		// Delete the build request when the session ends
-		deleteCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := p.k8sClient.Delete(deleteCtx, &v1alpha1.NixBuildRequest{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      fmt.Sprintf("build-%s", session.ID),
-				Namespace: p.namespace,
-			},
-		}); err != nil {
-			log.Error().Err(err).Str("session_id", session.ID).Msg("Failed to cleanup build request")
-		}
+		// Update status and delete the build request when the session ends
+		p.completeBuildRequest(session.ID, buildSucceeded, buildError)
 	}()
 
 	podIP, err := p.waitForBuilderPod(ctx, session)
 	if err != nil {
 		log.Error().Err(err).Str("session_id", session.ID).Msg("Failed to get builder pod")
+		buildError = err
 		return
 	}
 
-	if err := p.routeToBuilder(ctx, session, channel, requests, podIP); err != nil {
-		log.Error().Err(err).Str("session_id", session.ID).Msg("Failed to route to builder")
-		return
+	buildError = p.routeToBuilder(ctx, session, channel, requests, podIP)
+	if buildError != nil {
+		log.Error().Err(buildError).Str("session_id", session.ID).Msg("Failed to route to builder")
+	} else {
+		buildSucceeded = true
 	}
 }
 
@@ -326,6 +325,51 @@ func (p *SSHProxy) createBuildRequest(ctx context.Context, session *ProxySession
 
 	log.Info().Str("session_id", session.ID).Msg("Created NixBuildRequest")
 	return nil
+}
+
+func (p *SSHProxy) completeBuildRequest(sessionID string, succeeded bool, buildErr error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	buildReqName := fmt.Sprintf("build-%s", sessionID)
+	var buildReq v1alpha1.NixBuildRequest
+
+	if err := p.k8sClient.Get(ctx, client.ObjectKey{
+		Namespace: p.namespace,
+		Name:      buildReqName,
+	}, &buildReq); err != nil {
+		log.Error().Err(err).Str("session_id", sessionID).Msg("Failed to get build request for completion")
+		return
+	}
+
+	// Update status
+	now := metav1.Now()
+	if succeeded {
+		buildReq.Status.Phase = v1alpha1.BuildPhaseCompleted
+		buildReq.Status.Message = "Build completed successfully"
+	} else {
+		buildReq.Status.Phase = v1alpha1.BuildPhaseFailed
+		if buildErr != nil {
+			buildReq.Status.Message = fmt.Sprintf("Build failed: %v", buildErr)
+		} else {
+			buildReq.Status.Message = "Build failed"
+		}
+	}
+	buildReq.Status.CompletionTime = &now
+
+	if err := p.k8sClient.Status().Update(ctx, &buildReq); err != nil {
+		log.Error().Err(err).Str("session_id", sessionID).Msg("Failed to update build request status")
+	}
+
+	// Delete the build request (finalizer will clean up pod)
+	if err := p.k8sClient.Delete(ctx, &buildReq); err != nil {
+		log.Error().Err(err).Str("session_id", sessionID).Msg("Failed to delete build request")
+	}
+
+	log.Info().
+		Str("session_id", sessionID).
+		Bool("succeeded", succeeded).
+		Msg("Build request completed and marked for deletion")
 }
 
 func (p *SSHProxy) ensureSSHKeySecret(ctx context.Context) error {

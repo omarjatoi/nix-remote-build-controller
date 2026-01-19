@@ -127,45 +127,41 @@ func (r *NixBuildRequestReconciler) handleCreatingBuild(ctx context.Context, bui
 
 func (r *NixBuildRequestReconciler) handleRunningBuild(ctx context.Context, buildReq *nixv1alpha1.NixBuildRequest) (ctrl.Result, error) {
 	var pod corev1.Pod
-	if err := r.Get(ctx, client.ObjectKey{
+	err := r.Get(ctx, client.ObjectKey{
 		Namespace: buildReq.Namespace,
 		Name:      buildReq.Status.PodName,
-	}, &pod); err != nil {
-		return ctrl.Result{}, client.IgnoreNotFound(err)
-	}
+	}, &pod)
 
-	if pod.Status.Phase == corev1.PodSucceeded {
-		buildReq.Status.Phase = nixv1alpha1.BuildPhaseCompleted
-		buildReq.Status.CompletionTime = &metav1.Time{Time: time.Now()}
-		buildReq.Status.Message = "Build completed successfully"
-		return r.updateStatus(ctx, buildReq)
+	if err != nil {
+		if client.IgnoreNotFound(err) == nil {
+			buildReq.Status.Phase = nixv1alpha1.BuildPhaseFailed
+			buildReq.Status.CompletionTime = &metav1.Time{Time: time.Now()}
+			buildReq.Status.Message = "Builder pod was deleted unexpectedly"
+			return r.updateStatus(ctx, buildReq)
+		}
+		return ctrl.Result{}, err
 	}
 
 	if pod.Status.Phase == corev1.PodFailed {
 		buildReq.Status.Phase = nixv1alpha1.BuildPhaseFailed
 		buildReq.Status.CompletionTime = &metav1.Time{Time: time.Now()}
-		buildReq.Status.Message = "Build failed"
+		buildReq.Status.Message = fmt.Sprintf("Builder pod failed unexpectedly: %s", pod.Status.Message)
 		return r.updateStatus(ctx, buildReq)
 	}
 
-	return ctrl.Result{RequeueAfter: time.Second * 10}, nil
+	// Pod is still running, proxy is using it. Requeue to keep watching for failures.
+	return ctrl.Result{RequeueAfter: time.Second * 30}, nil
 }
 
 func (r *NixBuildRequestReconciler) handleCompletedBuild(ctx context.Context, buildReq *nixv1alpha1.NixBuildRequest) (ctrl.Result, error) {
-	if time.Since(buildReq.Status.CompletionTime.Time) > time.Minute*5 {
-		var pod corev1.Pod
-		if err := r.Get(ctx, client.ObjectKey{
-			Namespace: buildReq.Namespace,
-			Name:      buildReq.Status.PodName,
-		}, &pod); err == nil {
-			if err := r.Delete(ctx, &pod); err != nil {
-				log.Error().Err(err).Str("pod_name", buildReq.Status.PodName).Msg("Failed to delete completed pod")
-			} else {
-				log.Info().Str("pod_name", buildReq.Status.PodName).Msg("Cleaned up completed pod")
-			}
-		}
-	}
-
+	// Completed/Failed builds are waiting for deletion by the proxy.
+	// The finalizer will handle pod cleanup when that happens.
+	// This state should be transient - the proxy deletes the NixBuildRequest
+	// immediately after updating the status.
+	log.Debug().
+		Str("session_id", buildReq.Spec.SessionID).
+		Str("phase", string(buildReq.Status.Phase)).
+		Msg("Build completed, awaiting cleanup via deletion")
 	return ctrl.Result{}, nil
 }
 
