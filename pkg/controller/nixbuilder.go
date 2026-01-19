@@ -174,8 +174,8 @@ func (r *NixBuildRequestReconciler) createBuilderPod(buildReq *nixv1alpha1.NixBu
 				"nix.io/build-request": buildReq.Name,
 			},
 			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion:         buildReq.APIVersion,
-				Kind:               buildReq.Kind,
+				APIVersion:         nixv1alpha1.GroupVersion.String(),
+				Kind:               "NixBuildRequest",
 				Name:               buildReq.Name,
 				UID:                buildReq.UID,
 				Controller:         &[]bool{true}[0],
