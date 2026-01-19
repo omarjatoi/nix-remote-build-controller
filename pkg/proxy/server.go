@@ -136,8 +136,6 @@ func NewSSHProxy(ctx context.Context, addr, hostKeyPath, namespace, remoteUser s
 	return proxy, nil
 }
 
-// loadClientKeyFromSecret loads the SSH private key from a Kubernetes secret.
-// The secret must contain a key named "id_rsa" with the private key in PEM format.
 func loadClientKeyFromSecret(ctx context.Context, k8sClient client.Client, namespace, secretName string) (ssh.Signer, error) {
 	var secret corev1.Secret
 	if err := k8sClient.Get(ctx, client.ObjectKey{
