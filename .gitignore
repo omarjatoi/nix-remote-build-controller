@@ -35,3 +35,6 @@ result
 .direnv
 
 .DS_Store
+
+nix-builder-key
+nix-builder-key.pub
