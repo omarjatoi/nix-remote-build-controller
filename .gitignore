@@ -32,6 +32,7 @@ go.work.sum
 # .vscode/
 
 result
+result-man
 .direnv
 
 .DS_Store
