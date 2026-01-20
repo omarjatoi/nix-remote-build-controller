@@ -62,24 +62,31 @@
             set -e
 
             # Create necessary directories
-            mkdir -p /etc/ssh /var/empty /home/nixbld/.ssh /tmp
+            mkdir -p /etc/ssh /var/empty /home/nixbld/.ssh /tmp /run/sshd
 
             # Generate host key if needed
             if [ ! -f /etc/ssh/ssh_host_ed25519_key ]; then
               ${pkgs.openssh}/bin/ssh-keygen -t ed25519 -f /etc/ssh/ssh_host_ed25519_key -N ""
             fi
 
-            # Set up SSH config
+            # Copy authorized_keys from mounted secret (which is read-only)
+            # to a writable location
+            if [ -f /home/nixbld/.ssh/authorized_keys ]; then
+              cp /home/nixbld/.ssh/authorized_keys /tmp/authorized_keys
+            fi
+
+            # Set up SSH config pointing to writable authorized_keys location
             cat > /etc/ssh/sshd_config <<SSHD_CONFIG
             HostKey /etc/ssh/ssh_host_ed25519_key
-            AuthorizedKeysFile /home/nixbld/.ssh/authorized_keys
+            AuthorizedKeysFile /tmp/authorized_keys
             PasswordAuthentication no
             AllowUsers nixbld
+            StrictModes no
             SSHD_CONFIG
 
-            # Fix permissions
-            chown -R 1000:1000 /home/nixbld
-            chmod 700 /home/nixbld/.ssh
+            # Fix permissions on home directory (excluding mounted secret)
+            chown 1000:1000 /home/nixbld
+            chmod 755 /home/nixbld
 
             # Start nix-daemon in the background
             ${pkgs.nix}/bin/nix-daemon &
