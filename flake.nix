@@ -93,10 +93,12 @@
           builder-etc = pkgs.runCommand "builder-etc" { } ''
             mkdir -p $out/etc
             echo "root:x:0:0:root:/root:/bin/sh" > $out/etc/passwd
+            echo "sshd:x:999:999:SSH Daemon:/var/empty:/bin/false" >> $out/etc/passwd
             echo "nixbld:x:1000:1000:Nix Build User:/home/nixbld:/bin/sh" >> $out/etc/passwd
             echo "root:x:0:" > $out/etc/group
+            echo "sshd:x:999:" >> $out/etc/group
             echo "nixbld:x:1000:" >> $out/etc/group
-            mkdir -p $out/root $out/home/nixbld $out/tmp
+            mkdir -p $out/root $out/home/nixbld $out/tmp $out/var/empty
           '';
 
           builder-image = pkgs.dockerTools.buildImage {
@@ -112,7 +114,7 @@
                 self.packages.${system}.builder-entrypoint
                 self.packages.${system}.builder-etc
               ];
-              pathsToLink = [ "/bin" "/etc" "/share" "/root" "/home" "/tmp" ];
+              pathsToLink = [ "/bin" "/etc" "/share" "/root" "/home" "/tmp" "/var" ];
             };
             config = {
               Entrypoint = [ "${self.packages.${system}.builder-entrypoint}/bin/entrypoint" ];
