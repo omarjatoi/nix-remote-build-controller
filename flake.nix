@@ -62,13 +62,7 @@
             set -e
 
             # Create necessary directories
-            mkdir -p /etc/ssh /var/empty /home/nixbld/.ssh
-
-            # Create nixbld user if it doesn't exist
-            if ! id nixbld &>/dev/null; then
-              echo "nixbld:x:1000:1000:Nix Build User:/home/nixbld:/bin/sh" >> /etc/passwd
-              echo "nixbld:x:1000:" >> /etc/group
-            fi
+            mkdir -p /etc/ssh /var/empty /home/nixbld/.ssh /tmp
 
             # Generate host key if needed
             if [ ! -f /etc/ssh/ssh_host_ed25519_key ]; then
@@ -84,7 +78,7 @@
             SSHD_CONFIG
 
             # Fix permissions
-            chown -R nixbld:nixbld /home/nixbld
+            chown -R 1000:1000 /home/nixbld
             chmod 700 /home/nixbld/.ssh
 
             # Start nix-daemon in the background
@@ -93,6 +87,16 @@
 
             # Start SSHD
             exec ${pkgs.openssh}/bin/sshd -D -e
+          '';
+
+          # Base system files for the builder container
+          builder-etc = pkgs.runCommand "builder-etc" { } ''
+            mkdir -p $out/etc
+            echo "root:x:0:0:root:/root:/bin/sh" > $out/etc/passwd
+            echo "nixbld:x:1000:1000:Nix Build User:/home/nixbld:/bin/sh" >> $out/etc/passwd
+            echo "root:x:0:" > $out/etc/group
+            echo "nixbld:x:1000:" >> $out/etc/group
+            mkdir -p $out/root $out/home/nixbld $out/tmp
           '';
 
           builder-image = pkgs.dockerTools.buildImage {
@@ -106,8 +110,9 @@
                 pkgs.coreutils
                 pkgs.bashInteractive
                 self.packages.${system}.builder-entrypoint
+                self.packages.${system}.builder-etc
               ];
-              pathsToLink = [ "/bin" "/etc" "/share" ];
+              pathsToLink = [ "/bin" "/etc" "/share" "/root" "/home" "/tmp" ];
             };
             config = {
               Entrypoint = [ "${self.packages.${system}.builder-entrypoint}/bin/entrypoint" ];

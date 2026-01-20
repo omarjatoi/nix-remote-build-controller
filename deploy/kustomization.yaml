@@ -8,9 +8,10 @@ resources:
   - nix-config.yaml
   - proxy-deployment.yaml
 
-commonLabels:
-  app.kubernetes.io/name: nix-remote-build-controller
-  app.kubernetes.io/version: latest
+labels:
+  - pairs:
+      app.kubernetes.io/name: nix-remote-build-controller
+      app.kubernetes.io/version: latest
 
 images:
   - name: controller
