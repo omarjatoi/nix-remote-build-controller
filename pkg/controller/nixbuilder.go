@@ -200,9 +200,8 @@ func (r *NixBuildRequestReconciler) createBuilderPod(buildReq *nixv1alpha1.NixBu
 			ActiveDeadlineSeconds: buildReq.Spec.TimeoutSeconds,
 			NodeSelector:          buildReq.Spec.NodeSelector,
 			Containers: []corev1.Container{{
-				Name:    "nix-builder",
-				Image:   r.getBuilderImage(buildReq),
-				Command: []string{"/bin/entrypoint.sh"},
+				Name:  "nix-builder",
+				Image: r.getBuilderImage(buildReq),
 				Ports: []corev1.ContainerPort{{
 					ContainerPort: r.RemotePort,
 					Protocol:      corev1.ProtocolTCP,
