@@ -27,7 +27,6 @@
             src = ./.;
             vendorHash = "sha256-Ua6i6574AG84UsyAIj/KL5yc0+4BVVy1eR+N98qpUkQ=";
             subPackages = [ "cmd/${name}" ];
-            CGO_ENABLED = 0;
             ldflags = [
               "-s"
               "-w"
@@ -41,7 +40,11 @@
           imgPkgs.dockerTools.buildImage {
             name = "ghcr.io/omarjatoi/nix-remote-build-controller/${name}";
             tag = "latest";
-            contents = [ app ];
+            copyToRoot = pkgs.buildEnv {
+              name = name;
+              paths = [ app ];
+              pathsToLink = [ "/bin" ];
+            };
             config = {
               Entrypoint = [ "${app}/bin/${name}" ];
             };
