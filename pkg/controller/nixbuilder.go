@@ -9,6 +9,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -122,7 +123,7 @@ func (r *NixBuildRequestReconciler) handleCreatingBuild(ctx context.Context, bui
 		return r.updateStatus(ctx, buildReq)
 	}
 
-	if pod.Status.Phase == corev1.PodRunning && pod.Status.PodIP != "" {
+	if pod.Status.Phase == corev1.PodRunning && pod.Status.PodIP != "" && isPodReady(&pod) {
 		buildReq.Status.Phase = nixv1alpha1.BuildPhaseRunning
 		buildReq.Status.PodIP = pod.Status.PodIP
 		buildReq.Status.Message = "Builder pod ready for connections"
@@ -207,6 +208,16 @@ func (r *NixBuildRequestReconciler) createBuilderPod(buildReq *nixv1alpha1.NixBu
 					Protocol:      corev1.ProtocolTCP,
 				}},
 				Resources: buildReq.Spec.Resources,
+				ReadinessProbe: &corev1.Probe{
+					ProbeHandler: corev1.ProbeHandler{
+						TCPSocket: &corev1.TCPSocketAction{
+							Port: intstr.FromInt32(r.RemotePort),
+						},
+					},
+					InitialDelaySeconds: 1,
+					PeriodSeconds:       1,
+					FailureThreshold:    30,
+				},
 				VolumeMounts: []corev1.VolumeMount{{
 					Name:      "ssh-keys",
 					MountPath: "/home/nixbld/.ssh/authorized_keys",
@@ -312,6 +323,16 @@ func (r *NixBuildRequestReconciler) GracefulShutdown(ctx context.Context) error 
 
 	log.Info().Int("updated_requests", updatedCount).Msg("Completed graceful shutdown cleanup")
 	return nil
+}
+
+// isPodReady checks if all containers in the pod are ready
+func isPodReady(pod *corev1.Pod) bool {
+	for _, cond := range pod.Status.Conditions {
+		if cond.Type == corev1.ContainersReady && cond.Status == corev1.ConditionTrue {
+			return true
+		}
+	}
+	return false
 }
 
 // SetupWithManager sets up the controller with the Manager
