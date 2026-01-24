@@ -32,6 +32,8 @@ const (
 	SSHKeySecretPrivateKey = "private"
 	// SSHKeySecretPublicKey is the key in the secret containing the public key (authorized_keys)
 	SSHKeySecretPublicKey = "public"
+	// SSHKeySecretHostKey is the key in the secret containing the proxy's SSH host key
+	SSHKeySecretHostKey = "host-key"
 )
 
 type SSHProxy struct {
@@ -67,23 +69,6 @@ const (
 )
 
 func NewSSHProxy(ctx context.Context, addr, hostKeyPath, namespace, remoteUser string, remotePort int32, healthPort int, sshKeySecret string) (*SSHProxy, error) {
-	var hostKey ssh.Signer
-	var err error
-
-	if hostKeyPath != "" {
-		hostKey, err = loadHostKey(hostKeyPath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to load host key from %s: %w", hostKeyPath, err)
-		}
-		log.Info().Str("path", hostKeyPath).Msg("Loaded SSH host key")
-	} else {
-		log.Info().Msg("Generating temporary SSH host key")
-		hostKey, err = generateHostKey()
-		if err != nil {
-			return nil, fmt.Errorf("failed to generate host key: %w", err)
-		}
-	}
-
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to listen on %s: %w", addr, err)
@@ -115,6 +100,28 @@ func NewSSHProxy(ctx context.Context, addr, hostKeyPath, namespace, remoteUser s
 		return nil, fmt.Errorf("failed to load client key from secret %s: %w", sshKeySecret, err)
 	}
 	log.Info().Str("secret", sshKeySecret).Msg("Loaded SSH client key from secret")
+
+	// Load host key
+	var hostKey ssh.Signer
+	if hostKeyPath != "" {
+		hostKey, err = loadHostKey(hostKeyPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load host key from %s: %w", hostKeyPath, err)
+		}
+		log.Info().Str("path", hostKeyPath).Msg("Loaded SSH host key from file")
+	} else {
+		// Try to load host key from secret
+		hostKey, err = loadHostKeyFromSecret(ctx, k8sClient, namespace, sshKeySecret)
+		if err != nil {
+			log.Warn().Err(err).Msg("No host key in secret, generating temporary key (host key will change on restart)")
+			hostKey, err = generateHostKey()
+			if err != nil {
+				return nil, fmt.Errorf("failed to generate host key: %w", err)
+			}
+		} else {
+			log.Info().Str("secret", sshKeySecret).Msg("Loaded SSH host key from secret")
+		}
+	}
 
 	proxy := &SSHProxy{
 		listener:     listener,
@@ -153,6 +160,28 @@ func loadClientKeyFromSecret(ctx context.Context, k8sClient client.Client, names
 	signer, err := ssh.ParsePrivateKey(privateKeyBytes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse private key: %w", err)
+	}
+
+	return signer, nil
+}
+
+func loadHostKeyFromSecret(ctx context.Context, k8sClient client.Client, namespace, secretName string) (ssh.Signer, error) {
+	var secret corev1.Secret
+	if err := k8sClient.Get(ctx, client.ObjectKey{
+		Namespace: namespace,
+		Name:      secretName,
+	}, &secret); err != nil {
+		return nil, fmt.Errorf("failed to get secret: %w", err)
+	}
+
+	hostKeyBytes, ok := secret.Data[SSHKeySecretHostKey]
+	if !ok {
+		return nil, fmt.Errorf("secret %s missing key '%s'", secretName, SSHKeySecretHostKey)
+	}
+
+	signer, err := ssh.ParsePrivateKey(hostKeyBytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse host key: %w", err)
 	}
 
 	return signer, nil
