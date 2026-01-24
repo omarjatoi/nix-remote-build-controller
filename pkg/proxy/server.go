@@ -509,7 +509,8 @@ func (p *SSHProxy) routeToBuilder(ctx context.Context, session *ProxySession, ch
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_, err := io.Copy(builderChannel, channel)
+		n, err := io.Copy(builderChannel, channel)
+		log.Debug().Str("session_id", session.ID).Int64("bytes", n).Err(err).Msg("client->builder copy finished")
 		if err != nil && err != io.EOF && tunnelCtx.Err() == nil {
 			errChan <- fmt.Errorf("client->builder copy: %w", err)
 		}
@@ -522,7 +523,8 @@ func (p *SSHProxy) routeToBuilder(ctx context.Context, session *ProxySession, ch
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_, err := io.Copy(channel, builderChannel)
+		n, err := io.Copy(channel, builderChannel)
+		log.Debug().Str("session_id", session.ID).Int64("bytes", n).Err(err).Msg("builder->client copy finished")
 		if err != nil && err != io.EOF && tunnelCtx.Err() == nil {
 			errChan <- fmt.Errorf("builder->client copy: %w", err)
 		}
