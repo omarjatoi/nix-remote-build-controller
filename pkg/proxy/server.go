@@ -519,17 +519,32 @@ func (p *SSHProxy) routeToBuilder(ctx context.Context, session *ProxySession, ch
 		}
 	}()
 
-	// Forward data: builder -> client
+	// Forward stdout: builder -> client
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		n, err := io.Copy(channel, builderChannel)
-		log.Debug().Str("session_id", session.ID).Int64("bytes", n).Err(err).Msg("builder->client copy finished")
+		log.Debug().Str("session_id", session.ID).Int64("bytes", n).Err(err).Msg("builder->client stdout copy finished")
 		if err != nil && err != io.EOF && tunnelCtx.Err() == nil {
 			errChan <- fmt.Errorf("builder->client copy: %w", err)
 		}
 		if cw, ok := channel.(interface{ CloseWrite() error }); ok {
 			cw.CloseWrite()
+		}
+	}()
+
+	// Forward stderr: builder -> client
+	// TODO: log only for debugging
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		stderrData, err := io.ReadAll(builderChannel.Stderr())
+		log.Debug().Str("session_id", session.ID).Int("bytes", len(stderrData)).Err(err).Msg("builder->client stderr copy finished")
+		if err != nil && err != io.EOF && tunnelCtx.Err() == nil {
+			errChan <- fmt.Errorf("builder->client stderr: %w", err)
+		}
+		if len(stderrData) > 0 {
+			log.Warn().Str("session_id", session.ID).Str("stderr", string(stderrData)).Msg("Builder stderr output")
 		}
 	}()
 
