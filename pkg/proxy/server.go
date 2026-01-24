@@ -509,7 +509,6 @@ func (p *SSHProxy) routeToBuilder(ctx context.Context, session *ProxySession, ch
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		defer tunnelCancel()
 		_, err := io.Copy(builderChannel, channel)
 		if err != nil && err != io.EOF && tunnelCtx.Err() == nil {
 			errChan <- fmt.Errorf("client->builder copy: %w", err)
@@ -523,7 +522,6 @@ func (p *SSHProxy) routeToBuilder(ctx context.Context, session *ProxySession, ch
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		defer tunnelCancel()
 		_, err := io.Copy(channel, builderChannel)
 		if err != nil && err != io.EOF && tunnelCtx.Err() == nil {
 			errChan <- fmt.Errorf("builder->client copy: %w", err)
@@ -534,6 +532,7 @@ func (p *SSHProxy) routeToBuilder(ctx context.Context, session *ProxySession, ch
 	}()
 
 	wg.Wait()
+	tunnelCancel()
 
 	select {
 	case err := <-errChan:
