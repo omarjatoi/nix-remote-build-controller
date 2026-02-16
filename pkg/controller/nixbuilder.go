@@ -214,7 +214,7 @@ func (r *NixBuildRequestReconciler) createBuilderPod(buildReq *nixv1alpha1.NixBu
 			Containers: []corev1.Container{{
 				Name:            "nix-builder",
 				Image:           r.getBuilderImage(buildReq),
-				ImagePullPolicy: corev1.PullIfNotPresent,
+				ImagePullPolicy: corev1.PullAlways,
 				Ports: []corev1.ContainerPort{{
 					ContainerPort: r.RemotePort,
 					Protocol:      corev1.ProtocolTCP,

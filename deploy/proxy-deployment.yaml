@@ -32,7 +32,7 @@ spec:
       containers:
         - name: proxy
           image: proxy
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           args:
             - --port=2222
             - --health-port=8080
