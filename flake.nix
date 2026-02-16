@@ -70,20 +70,14 @@
             # Set up system users
             echo 'root:x:0:0:root:/root:/bin/sh' > /etc/passwd
             echo 'sshd:x:999:999:SSH Daemon:/var/empty:/bin/false' >> /etc/passwd
-            echo 'nixbld:x:1000:30000:Nix Build User:/home/nixbld:/bin/sh' >> /etc/passwd
-            for i in $(seq 1 32); do
-              echo "nixbld$i:x:$((30000 + i)):30000:Nix Build User $i:/var/empty:/bin/false" >> /etc/passwd
-            done
+            echo 'nixbld:x:1000:1000:Nix Build User:/home/nixbld:/bin/sh' >> /etc/passwd
             echo 'root:x:0:' > /etc/group
             echo 'sshd:x:999:' >> /etc/group
-            MEMBERS="nixbld"
-            for i in $(seq 1 32); do
-              MEMBERS="''${MEMBERS},nixbld$i"
-            done
-            echo "nixbld:x:30000:$MEMBERS" >> /etc/group
+            echo 'nixbld:x:1000:nixbld' >> /etc/group
 
-            # Set up nix store state directories and give nixbld ownership
-            mkdir -p /nix/var/nix/db /nix/var/nix/gcroots /nix/var/nix/profiles /nix/var/nix/temproots /nix/var/nix/daemon-socket
+            # Give nixbld ownership of the nix store (single-user mode)
+            mkdir -p /nix/var/nix/db /nix/var/nix/gcroots /nix/var/nix/profiles /nix/var/nix/temproots
+            chmod 1775 /nix/store
             chown -R nixbld:nixbld /nix/store /nix/var
 
             # Generate host key if needed
@@ -108,10 +102,6 @@
             StrictModes no
             SSHD_CONFIG
 
-            # Start nix-daemon in the background
-            ${pkgs.nix}/bin/nix-daemon &
-            sleep 1
-
             # Start SSHD
             exec ${pkgs.openssh}/bin/sshd -D -e
           '';
@@ -121,11 +111,11 @@
             mkdir -p $out/etc
             echo "root:x:0:0:root:/root:/bin/sh" > $out/etc/passwd
             echo "sshd:x:999:999:SSH Daemon:/var/empty:/bin/false" >> $out/etc/passwd
-            echo "nixbld:x:1000:30000:Nix Build User:/home/nixbld:/bin/sh" >> $out/etc/passwd
+            echo "nixbld:x:1000:1000:Nix Build User:/home/nixbld:/bin/sh" >> $out/etc/passwd
             echo "root:x:0:" > $out/etc/group
             echo "sshd:x:999:" >> $out/etc/group
-            echo "nixbld:x:30000:" >> $out/etc/group
-            mkdir -p $out/root/.ssh $out/home/nixbld/.ssh $out/tmp $out/var/empty
+            echo "nixbld:x:1000:" >> $out/etc/group
+            mkdir -p $out/home/nixbld/.ssh $out/tmp $out/var/empty
           '';
 
           builder-image = pkgs.dockerTools.buildImage {
