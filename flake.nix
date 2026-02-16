@@ -78,7 +78,10 @@
             # Give nixbld ownership of the nix store (single-user mode)
             mkdir -p /nix/var/nix/db /nix/var/nix/gcroots /nix/var/nix/profiles /nix/var/nix/temproots
             chmod 1775 /nix/store
-            chown -R nixbld:nixbld /nix/store /nix/var /home/nixbld
+            chown -R nixbld:nixbld /nix/store /nix/var
+            # chown home without -R to avoid the read-only secret mount at .ssh/authorized_keys
+            chown nixbld:nixbld /home/nixbld
+            chown -R nixbld:nixbld /home/nixbld/.cache
 
             # Generate host key if needed
             if [ ! -f /etc/ssh/ssh_host_ed25519_key ]; then

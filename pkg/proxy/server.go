@@ -298,36 +298,22 @@ func (p *SSHProxy) handleConnection(ctx context.Context, netConn net.Conn) {
 	}
 	defer sshConn.Close()
 
-	sessionID := generateSessionID()
-	session := &ProxySession{
-		ID:      sessionID,
-		SSHConn: sshConn,
-		Status:  SessionPending,
-	}
-
-	p.sessionsMux.Lock()
-	p.sessions[sessionID] = session
-	p.sessionsMux.Unlock()
-	defer func() {
-		p.sessionsMux.Lock()
-		delete(p.sessions, sessionID)
-		p.sessionsMux.Unlock()
-	}()
-
-	log.Info().Str("session_id", sessionID).Str("client_addr", sshConn.RemoteAddr().String()).Msg("New SSH connection")
+	log.Info().Str("client_addr", sshConn.RemoteAddr().String()).Msg("New SSH connection")
 
 	go ssh.DiscardRequests(reqs)
+
+	var channelWg sync.WaitGroup
 	for newChannel := range chans {
-		if session.Status != SessionPending {
-			newChannel.Reject(ssh.Prohibited, "only one session per connection")
-			continue
-		}
-		session.Status = SessionConnected
-		p.handleChannel(ctx, session, newChannel)
+		channelWg.Add(1)
+		go func(nc ssh.NewChannel) {
+			defer channelWg.Done()
+			p.handleChannel(ctx, sshConn, nc)
+		}(newChannel)
 	}
+	channelWg.Wait()
 }
 
-func (p *SSHProxy) handleChannel(ctx context.Context, session *ProxySession, newChannel ssh.NewChannel) {
+func (p *SSHProxy) handleChannel(ctx context.Context, sshConn ssh.Conn, newChannel ssh.NewChannel) {
 	if newChannel.ChannelType() != "session" {
 		newChannel.Reject(ssh.UnknownChannelType, "unknown channel type")
 		return
@@ -339,6 +325,22 @@ func (p *SSHProxy) handleChannel(ctx context.Context, session *ProxySession, new
 		return
 	}
 	defer channel.Close()
+
+	sessionID := generateSessionID()
+	session := &ProxySession{
+		ID:      sessionID,
+		SSHConn: sshConn,
+		Status:  SessionConnected,
+	}
+
+	p.sessionsMux.Lock()
+	p.sessions[sessionID] = session
+	p.sessionsMux.Unlock()
+	defer func() {
+		p.sessionsMux.Lock()
+		delete(p.sessions, sessionID)
+		p.sessionsMux.Unlock()
+	}()
 
 	log.Info().Str("session_id", session.ID).Msg("Handling SSH session channel")
 
