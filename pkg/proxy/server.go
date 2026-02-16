@@ -246,6 +246,8 @@ func (p *SSHProxy) gracefulShutdown(ctx context.Context) error {
 		close(p.shutdownChan)
 	})
 
+	p.listener.Close()
+
 	log.Info().Int("active_connections", p.getActiveSessionCount()).Msg("Gracefully terminating, waiting for active connections to complete")
 
 	done := make(chan struct{})
@@ -316,7 +318,12 @@ func (p *SSHProxy) handleConnection(ctx context.Context, netConn net.Conn) {
 
 	go ssh.DiscardRequests(reqs)
 	for newChannel := range chans {
-		go p.handleChannel(ctx, session, newChannel)
+		if session.Status != SessionPending {
+			newChannel.Reject(ssh.Prohibited, "only one session per connection")
+			continue
+		}
+		session.Status = SessionConnected
+		p.handleChannel(ctx, session, newChannel)
 	}
 }
 
@@ -429,7 +436,8 @@ func (p *SSHProxy) completeBuildRequest(sessionID string, succeeded bool, buildE
 func (p *SSHProxy) waitForBuilderPod(ctx context.Context, session *ProxySession) (string, error) {
 	buildReqName := fmt.Sprintf("build-%s", session.ID)
 
-	timeout := time.After(time.Minute * 2)
+	timer := time.NewTimer(time.Minute * 2)
+	defer timer.Stop()
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 
@@ -437,7 +445,7 @@ func (p *SSHProxy) waitForBuilderPod(ctx context.Context, session *ProxySession)
 		select {
 		case <-ctx.Done():
 			return "", ctx.Err()
-		case <-timeout:
+		case <-timer.C:
 			return "", fmt.Errorf("timeout waiting for builder pod")
 		case <-ticker.C:
 			var buildReq v1alpha1.NixBuildRequest
@@ -498,14 +506,14 @@ func (p *SSHProxy) routeToBuilder(ctx context.Context, session *ProxySession, ch
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		p.forwardRequests(tunnelCtx, requests, builderChannel, session.ID, "client->builder")
+		p.forwardRequests(tunnelCtx, requests, builderChannel, session.ID, "client->builder", cancelTunnel)
 	}()
 
 	// Forward requests: builder -> client
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		p.forwardRequests(tunnelCtx, builderRequests, channel, session.ID, "builder->client")
+		p.forwardRequests(tunnelCtx, builderRequests, channel, session.ID, "builder->client", cancelTunnel)
 	}()
 
 	// Forward data: client -> builder
@@ -571,7 +579,7 @@ func (p *SSHProxy) routeToBuilder(ctx context.Context, session *ProxySession, ch
 	}
 }
 
-func (p *SSHProxy) forwardRequests(ctx context.Context, src <-chan *ssh.Request, dst ssh.Channel, sessionID, direction string) {
+func (p *SSHProxy) forwardRequests(ctx context.Context, src <-chan *ssh.Request, dst ssh.Channel, sessionID, direction string, cancel func()) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -599,7 +607,8 @@ func (p *SSHProxy) forwardRequests(ctx context.Context, src <-chan *ssh.Request,
 				if req.WantReply {
 					req.Reply(false, nil)
 				}
-				continue
+				cancel()
+				return
 			}
 			if req.WantReply {
 				req.Reply(accepted, nil)

@@ -7,6 +7,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -83,8 +84,11 @@ func (r *NixBuildRequestReconciler) handlePendingBuild(ctx context.Context, buil
 
 	pod := r.createBuilderPod(buildReq)
 	if err := r.Create(ctx, pod); err != nil {
-		log.Error().Err(err).Str("session_id", buildReq.Spec.SessionID).Msg("Failed to create builder pod")
-		return ctrl.Result{}, err
+		if !apierrors.IsAlreadyExists(err) {
+			log.Error().Err(err).Str("session_id", buildReq.Spec.SessionID).Msg("Failed to create builder pod")
+			return ctrl.Result{}, err
+		}
+		log.Info().Str("session_id", buildReq.Spec.SessionID).Msg("Builder pod already exists, continuing")
 	}
 
 	buildReq.Status.Phase = nixv1alpha1.BuildPhaseCreating
@@ -164,6 +168,13 @@ func (r *NixBuildRequestReconciler) handleRunningBuild(ctx context.Context, buil
 		return r.updateStatus(ctx, buildReq)
 	}
 
+	if pod.Status.Phase == corev1.PodSucceeded {
+		buildReq.Status.Phase = nixv1alpha1.BuildPhaseCompleted
+		buildReq.Status.CompletionTime = &metav1.Time{Time: time.Now()}
+		buildReq.Status.Message = "Builder pod completed"
+		return r.updateStatus(ctx, buildReq)
+	}
+
 	return ctrl.Result{RequeueAfter: time.Second * 30}, nil
 }
 
@@ -203,7 +214,7 @@ func (r *NixBuildRequestReconciler) createBuilderPod(buildReq *nixv1alpha1.NixBu
 			Containers: []corev1.Container{{
 				Name:            "nix-builder",
 				Image:           r.getBuilderImage(buildReq),
-				ImagePullPolicy: corev1.PullNever,
+				ImagePullPolicy: corev1.PullIfNotPresent,
 				Ports: []corev1.ContainerPort{{
 					ContainerPort: r.RemotePort,
 					Protocol:      corev1.ProtocolTCP,
@@ -221,7 +232,7 @@ func (r *NixBuildRequestReconciler) createBuilderPod(buildReq *nixv1alpha1.NixBu
 				},
 				VolumeMounts: []corev1.VolumeMount{{
 					Name:      "ssh-keys",
-					MountPath: "/root/.ssh/authorized_keys",
+					MountPath: "/home/nixbld/.ssh/authorized_keys",
 					SubPath:   "public",
 					ReadOnly:  true,
 				}},
