@@ -65,7 +65,7 @@
             set -e
 
             # Create necessary directories
-            mkdir -p /etc/ssh /var/empty /home/nixbld/.ssh /tmp /run/sshd
+            mkdir -p /etc/ssh /var/empty /home/nixbld/.ssh /home/nixbld/.cache/nix /tmp /run/sshd
 
             # Set up system users
             echo 'root:x:0:0:root:/root:/bin/sh' > /etc/passwd
@@ -78,7 +78,7 @@
             # Give nixbld ownership of the nix store (single-user mode)
             mkdir -p /nix/var/nix/db /nix/var/nix/gcroots /nix/var/nix/profiles /nix/var/nix/temproots
             chmod 1775 /nix/store
-            chown -R nixbld:nixbld /nix/store /nix/var
+            chown -R nixbld:nixbld /nix/store /nix/var /home/nixbld
 
             # Generate host key if needed
             if [ ! -f /etc/ssh/ssh_host_ed25519_key ]; then
