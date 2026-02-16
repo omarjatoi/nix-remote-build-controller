@@ -168,7 +168,8 @@ func setupHealthChecks(mgr ctrl.Manager, shuttingDown *atomic.Bool, port int) er
 }
 
 func init() {
-	rootCmd.Flags().StringVar(&builderImage, "builder-image", "nixos/nix:latest", "Builder container image")
+	rootCmd.Flags().StringVar(&builderImage, "builder-image", "", "Builder container image (required)")
+	rootCmd.MarkFlagRequired("builder-image")
 	rootCmd.Flags().Int32Var(&remotePort, "remote-port", 22, "SSH port in builder pods")
 	rootCmd.Flags().StringVar(&nixConfigMap, "nix-config", "", "ConfigMap containing nix.conf (optional)")
 	rootCmd.Flags().StringVar(&sshKeySecret, "ssh-key-secret", "nix-builder-ssh-keys", "Secret containing SSH keypair for builder authentication (must contain 'private' and 'public' keys)")

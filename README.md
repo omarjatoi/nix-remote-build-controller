@@ -89,7 +89,7 @@ kubectl get nixbuildrequests -w
 #### SSH Proxy (`cmd/proxy`)
 
 - Listens for incoming SSH connections from Nix clients
-- Creates a `NixBuildRequest` CR for each session
+- Creates a `NixBuildRequest` CR for each SSH channel
 - Waits for the controller to provision a builder pod
 - Forwards the SSH session to the builder pod
 - Updates the CR status when the build completes
@@ -106,8 +106,8 @@ kubectl get nixbuildrequests -w
 
 #### Builder Image
 
-- Based on `nixos/nix` with SSH server enabled
-- Runs `nix-daemon` for multi-user builds
+- Custom Nix-built image with `nix`, `openssh`, `coreutils`, and `bash`
+- Runs single-user Nix (no `nix-daemon`) as the `nixbld` user
 - Accepts SSH connections from the proxy
 - Configured via mounted ConfigMap for Nix settings
 
@@ -147,10 +147,11 @@ Phases: `Pending` → `Creating` → `Running` → `Completed`/`Failed`
 |------|---------|-------------|
 | `--port` | `2222` | SSH listen port |
 | `--health-port` | `8080` | Health check port |
+| `--host-key` | (none) | Path to SSH host private key file (auto-generated if unset) |
 | `--namespace` | `default` | Namespace for build requests |
 | `--remote-user` | `nixbld` | SSH user on builder pods |
 | `--remote-port` | `22` | SSH port on builder pods |
-| `--ssh-key-secret` | (required) | Secret containing SSH keypair |
+| `--ssh-key-secret` | `nix-builder-ssh-keys` | Secret containing SSH keypair |
 
 ### Controller Flags
 
@@ -158,8 +159,8 @@ Phases: `Pending` → `Creating` → `Running` → `Completed`/`Failed`
 |------|---------|-------------|
 | `--builder-image` | (required) | Container image for builder pods |
 | `--remote-port` | `22` | SSH port on builder pods |
-| `--nix-config` | (required) | ConfigMap name with nix.conf |
-| `--ssh-key-secret` | (required) | Secret containing SSH keypair |
+| `--nix-config` | (none) | ConfigMap name with nix.conf (optional) |
+| `--ssh-key-secret` | `nix-builder-ssh-keys` | Secret containing SSH keypair |
 | `--health-port` | `8081` | Health check port |
 | `--shutdown-timeout` | `30s` | Graceful shutdown timeout |
 
