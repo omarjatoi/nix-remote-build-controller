@@ -201,8 +201,9 @@ func (r *NixBuildRequestReconciler) createBuilderPod(buildReq *nixv1alpha1.NixBu
 			ActiveDeadlineSeconds: buildReq.Spec.TimeoutSeconds,
 			NodeSelector:          buildReq.Spec.NodeSelector,
 			Containers: []corev1.Container{{
-				Name:  "nix-builder",
-				Image: r.getBuilderImage(buildReq),
+				Name:            "nix-builder",
+				Image:           r.getBuilderImage(buildReq),
+				ImagePullPolicy: corev1.PullNever,
 				Ports: []corev1.ContainerPort{{
 					ContainerPort: r.RemotePort,
 					Protocol:      corev1.ProtocolTCP,
@@ -220,7 +221,7 @@ func (r *NixBuildRequestReconciler) createBuilderPod(buildReq *nixv1alpha1.NixBu
 				},
 				VolumeMounts: []corev1.VolumeMount{{
 					Name:      "ssh-keys",
-					MountPath: "/home/nixbld/.ssh/authorized_keys",
+					MountPath: "/root/.ssh/authorized_keys",
 					SubPath:   "public",
 					ReadOnly:  true,
 				}},

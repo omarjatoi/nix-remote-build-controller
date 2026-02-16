@@ -65,7 +65,25 @@
             set -e
 
             # Create necessary directories
-            mkdir -p /etc/ssh /var/empty /home/nixbld/.ssh /tmp /run/sshd
+            mkdir -p /etc/ssh /var/empty /root/.ssh /tmp /run/sshd
+
+            # Set up system users (including nix build users)
+            echo 'root:x:0:0:root:/root:/bin/sh' > /etc/passwd
+            echo 'sshd:x:999:999:SSH Daemon:/var/empty:/bin/false' >> /etc/passwd
+            for i in $(seq 1 32); do
+              echo "nixbld$i:x:$((30000 + i)):30000:Nix Build User $i:/var/empty:/bin/false" >> /etc/passwd
+            done
+            echo 'root:x:0:' > /etc/group
+            echo 'sshd:x:999:' >> /etc/group
+            MEMBERS=""
+            for i in $(seq 1 32); do
+              [ -n "$MEMBERS" ] && MEMBERS="$MEMBERS,"
+              MEMBERS="''${MEMBERS}nixbld$i"
+            done
+            echo "nixbld:x:30000:$MEMBERS" >> /etc/group
+
+            # Set up nix store state directories
+            mkdir -p /nix/var/nix/db /nix/var/nix/gcroots /nix/var/nix/profiles /nix/var/nix/temproots /nix/var/nix/daemon-socket
 
             # Generate host key if needed
             if [ ! -f /etc/ssh/ssh_host_ed25519_key ]; then
@@ -74,22 +92,20 @@
 
             # Copy authorized_keys from mounted secret (which is read-only)
             # to a writable location
-            if [ -f /home/nixbld/.ssh/authorized_keys ]; then
-              cp /home/nixbld/.ssh/authorized_keys /tmp/authorized_keys
+            if [ -f /root/.ssh/authorized_keys ]; then
+              cp /root/.ssh/authorized_keys /tmp/authorized_keys
+              chmod 600 /tmp/authorized_keys
             fi
 
-            # Set up SSH config pointing to writable authorized_keys location
+            # Set up SSH config - root login with restricted commands
             cat > /etc/ssh/sshd_config <<SSHD_CONFIG
             HostKey /etc/ssh/ssh_host_ed25519_key
             AuthorizedKeysFile /tmp/authorized_keys
             PasswordAuthentication no
-            AllowUsers nixbld
+            PermitRootLogin prohibit-password
+            AllowUsers root
             StrictModes no
             SSHD_CONFIG
-
-            # Fix permissions on home directory (excluding mounted secret)
-            chown 1000:1000 /home/nixbld
-            chmod 755 /home/nixbld
 
             # Start nix-daemon in the background
             ${pkgs.nix}/bin/nix-daemon &
@@ -108,7 +124,7 @@
             echo "root:x:0:" > $out/etc/group
             echo "sshd:x:999:" >> $out/etc/group
             echo "nixbld:x:1000:" >> $out/etc/group
-            mkdir -p $out/root $out/home/nixbld $out/tmp $out/var/empty
+            mkdir -p $out/root/.ssh $out/home/nixbld $out/tmp $out/var/empty
           '';
 
           builder-image = pkgs.dockerTools.buildImage {

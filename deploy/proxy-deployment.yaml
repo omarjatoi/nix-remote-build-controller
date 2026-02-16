@@ -32,12 +32,12 @@ spec:
       containers:
         - name: proxy
           image: proxy
-          imagePullPolicy: Always
+          imagePullPolicy: Never
           args:
             - --port=2222
             - --health-port=8080
             - --namespace=default
-            - --remote-user=nixbld
+            - --remote-user=root
             - --remote-port=22
             - --ssh-key-secret=nix-builder-ssh-keys
           ports:

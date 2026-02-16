@@ -481,6 +481,9 @@ func (p *SSHProxy) routeToBuilder(ctx context.Context, session *ProxySession, ch
 	tunnelCtx, tunnelCancel := context.WithCancel(ctx)
 	defer tunnelCancel()
 
+	var cancelOnce sync.Once
+	cancelTunnel := func() { cancelOnce.Do(tunnelCancel) }
+
 	var wg sync.WaitGroup
 
 	errChan := make(chan error, 4)
@@ -512,7 +515,11 @@ func (p *SSHProxy) routeToBuilder(ctx context.Context, session *ProxySession, ch
 		n, err := io.Copy(builderChannel, channel)
 		log.Debug().Str("session_id", session.ID).Int64("bytes", n).Err(err).Msg("client->builder copy finished")
 		if err != nil && err != io.EOF && tunnelCtx.Err() == nil {
-			errChan <- fmt.Errorf("client->builder copy: %w", err)
+			select {
+			case errChan <- fmt.Errorf("client->builder copy: %w", err):
+			default:
+			}
+			cancelTunnel()
 		}
 		if cw, ok := builderChannel.(interface{ CloseWrite() error }); ok {
 			cw.CloseWrite()
@@ -526,30 +533,33 @@ func (p *SSHProxy) routeToBuilder(ctx context.Context, session *ProxySession, ch
 		n, err := io.Copy(channel, builderChannel)
 		log.Debug().Str("session_id", session.ID).Int64("bytes", n).Err(err).Msg("builder->client stdout copy finished")
 		if err != nil && err != io.EOF && tunnelCtx.Err() == nil {
-			errChan <- fmt.Errorf("builder->client copy: %w", err)
+			select {
+			case errChan <- fmt.Errorf("builder->client copy: %w", err):
+			default:
+			}
 		}
+		cancelTunnel()
 		if cw, ok := channel.(interface{ CloseWrite() error }); ok {
 			cw.CloseWrite()
 		}
 	}()
 
 	// Forward stderr: builder -> client
-	// TODO: log only for debugging
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		stderrData, err := io.ReadAll(builderChannel.Stderr())
-		log.Debug().Str("session_id", session.ID).Int("bytes", len(stderrData)).Err(err).Msg("builder->client stderr copy finished")
+		n, err := io.Copy(channel.Stderr(), builderChannel.Stderr())
+		log.Debug().Str("session_id", session.ID).Int64("bytes", n).Err(err).Msg("builder->client stderr copy finished")
 		if err != nil && err != io.EOF && tunnelCtx.Err() == nil {
-			errChan <- fmt.Errorf("builder->client stderr: %w", err)
-		}
-		if len(stderrData) > 0 {
-			log.Warn().Str("session_id", session.ID).Str("stderr", string(stderrData)).Msg("Builder stderr output")
+			select {
+			case errChan <- fmt.Errorf("builder->client stderr: %w", err):
+			default:
+			}
 		}
 	}()
 
 	wg.Wait()
-	tunnelCancel()
+	cancelTunnel()
 
 	select {
 	case err := <-errChan:

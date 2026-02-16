@@ -17,7 +17,7 @@ spec:
       containers:
         - name: controller
           image: controller
-          imagePullPolicy: Always
+          imagePullPolicy: Never
           args:
             - --builder-image=ghcr.io/omarjatoi/nix-remote-build-controller/builder:latest
             - --remote-port=22
