@@ -145,7 +145,7 @@
           buildInputs = with pkgs; [
             go
             golangci-lint
-            nixfmt-rfc-style
+            nixfmt
           ];
         };
 
