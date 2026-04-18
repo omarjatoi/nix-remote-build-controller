@@ -46,6 +46,8 @@ spec:
                 timeoutSeconds:
                   type: integer
                   format: int64
+                  default: 3600
+                  minimum: 0
                   description: "Timeout for the build in seconds"
                 nodeSelector:
                   type: object

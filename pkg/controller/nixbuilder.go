@@ -28,6 +28,8 @@ type NixBuildRequestReconciler struct {
 	SSHKeySecret string
 }
 
+const defaultBuildTimeoutSeconds int64 = 3600
+
 // Reconcile handles NixBuildRequest events
 func (r *NixBuildRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	// Check for shutdown early
@@ -188,6 +190,19 @@ func (r *NixBuildRequestReconciler) handleCompletedBuild(ctx context.Context, bu
 
 func (r *NixBuildRequestReconciler) createBuilderPod(buildReq *nixv1alpha1.NixBuildRequest) *corev1.Pod {
 	podName := fmt.Sprintf("nix-builder-%s", buildReq.Spec.SessionID)
+	defaultTimeout := defaultBuildTimeoutSeconds
+	zeroTimeout := int64(0)
+	timeoutSeconds := buildReq.Spec.TimeoutSeconds
+	if timeoutSeconds == nil {
+		timeoutSeconds = &defaultTimeout
+	}
+	if *timeoutSeconds < 0 {
+		log.Warn().
+			Str("session_id", buildReq.Spec.SessionID).
+			Int64("timeout_seconds", *timeoutSeconds).
+			Msg("Negative timeoutSeconds provided; clamping to 0")
+		timeoutSeconds = &zeroTimeout
+	}
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -209,7 +224,7 @@ func (r *NixBuildRequestReconciler) createBuilderPod(buildReq *nixv1alpha1.NixBu
 		},
 		Spec: corev1.PodSpec{
 			RestartPolicy:         corev1.RestartPolicyNever,
-			ActiveDeadlineSeconds: buildReq.Spec.TimeoutSeconds,
+			ActiveDeadlineSeconds: timeoutSeconds,
 			NodeSelector:          buildReq.Spec.NodeSelector,
 			Containers: []corev1.Container{{
 				Name:            "nix-builder",

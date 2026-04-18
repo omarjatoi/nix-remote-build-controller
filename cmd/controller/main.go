@@ -72,9 +72,17 @@ var rootCmd = &cobra.Command{
 
 		// Setup health checks
 		var shuttingDown atomic.Bool
-		if err := setupHealthChecks(mgr, &shuttingDown, healthPort); err != nil {
+		healthServer, err := setupHealthChecks(&shuttingDown, healthPort)
+		if err != nil {
 			log.Fatal().Err(err).Msg("Failed to setup health checks")
 		}
+		defer shutdownHealthServer(healthServer)
+
+		go func() {
+			<-ctx.Done()
+			shuttingDown.Store(true)
+			log.Info().Msg("Shutdown signal received, readiness set to unhealthy")
+		}()
 
 		log.Info().
 			Str("builder_image", builderImage).
@@ -95,7 +103,6 @@ var rootCmd = &cobra.Command{
 		err = <-mgrDone
 
 		if ctx.Err() != nil {
-			shuttingDown.Store(true)
 			log.Info().Dur("timeout", shutdownTimeout).Msg("Shutdown signal received, starting graceful shutdown")
 
 			cleanupDone := make(chan struct{})
@@ -131,7 +138,7 @@ var versionCmd = &cobra.Command{
 	},
 }
 
-func setupHealthChecks(mgr ctrl.Manager, shuttingDown *atomic.Bool, port int) error {
+func setupHealthChecks(shuttingDown *atomic.Bool, port int) (*http.Server, error) {
 	mux := http.NewServeMux()
 
 	// Liveness probe - "is the process running?"
@@ -164,7 +171,20 @@ func setupHealthChecks(mgr ctrl.Manager, shuttingDown *atomic.Bool, port int) er
 		}
 	}()
 
-	return nil
+	return server, nil
+}
+
+func shutdownHealthServer(server *http.Server) {
+	if server == nil {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := server.Shutdown(ctx); err != nil {
+		log.Warn().Err(err).Msg("Health server shutdown failed")
+	}
 }
 
 func init() {

@@ -20,6 +20,7 @@ import (
 	"github.com/rs/zerolog/log"
 	"golang.org/x/crypto/ssh"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -455,7 +456,25 @@ func (p *SSHProxy) waitForBuilderPod(ctx context.Context, session *ProxySession)
 				Namespace: p.namespace,
 				Name:      buildReqName,
 			}, &buildReq); err != nil {
-				continue
+				if apierrors.IsNotFound(err) {
+					continue
+				}
+				return "", fmt.Errorf("failed to read build request %s: %w", buildReqName, err)
+			}
+
+			if buildReq.Status.Phase == v1alpha1.BuildPhaseFailed {
+				if buildReq.Status.Message != "" {
+					return "", fmt.Errorf("build request failed before pod became ready: %s", buildReq.Status.Message)
+				}
+				return "", fmt.Errorf("build request failed before pod became ready")
+			}
+
+			if buildReq.Status.Phase == v1alpha1.BuildPhaseCompleted {
+				return "", fmt.Errorf("build request completed before pod became ready")
+			}
+
+			if buildReq.DeletionTimestamp != nil {
+				return "", fmt.Errorf("build request was deleted before pod became ready")
 			}
 
 			if buildReq.Status.Phase == v1alpha1.BuildPhaseRunning && buildReq.Status.PodIP != "" {
