@@ -19,11 +19,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/recorder"
 
 	nixv1alpha1 "github.com/omarjatoi/nix-remote-build-controller/pkg/apis/nixbuilder/v1alpha1"
 )
@@ -64,7 +64,7 @@ const (
 type NixBuildRequestReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
-	Recorder record.EventRecorder
+	Recorder recorder.EventRecorder
 
 	// BuilderImage is the default builder image; NixBuildRequest.spec.image overrides it.
 	BuilderImage string
@@ -150,7 +150,7 @@ func (r *NixBuildRequestReconciler) handlePending(ctx context.Context, logger ze
 	if err := r.Create(ctx, pod); err != nil {
 		if !apierrors.IsAlreadyExists(err) {
 			logger.Error().Err(err).Msg("Failed to create builder pod")
-			r.event(buildReq, corev1.EventTypeWarning, "PodCreateFailed", err.Error())
+			r.event(buildReq, corev1.EventTypeWarning, "PodCreateFailed", "CreatePod", err.Error())
 			// Surface the reason to the proxy without failing yet; API errors
 			// are usually transient (quota, admission webhooks).
 			buildReq.Status.Message = "Failed to create builder pod: " + err.Error()
@@ -162,7 +162,7 @@ func (r *NixBuildRequestReconciler) handlePending(ctx context.Context, logger ze
 		logger.Info().Str("pod", pod.Name).Msg("Builder pod already exists, adopting it")
 	} else {
 		logger.Info().Str("pod", pod.Name).Msg("Created builder pod")
-		r.event(buildReq, corev1.EventTypeNormal, "PodCreated", "Created builder pod "+pod.Name)
+		r.event(buildReq, corev1.EventTypeNormal, "PodCreated", "CreatePod", "Created builder pod "+pod.Name)
 	}
 
 	now := metav1.Now()
@@ -193,7 +193,7 @@ func (r *NixBuildRequestReconciler) handleCreating(ctx context.Context, logger z
 			buildReq.Status.PodIP = pod.Status.PodIP
 			buildReq.Status.Message = "Builder pod ready for connections"
 			logger.Info().Str("pod", pod.Name).Str("pod_ip", pod.Status.PodIP).Msg("Builder pod ready")
-			r.event(buildReq, corev1.EventTypeNormal, "PodReady", "Builder pod "+pod.Name+" is ready")
+			r.event(buildReq, corev1.EventTypeNormal, "PodReady", "AwaitReady", "Builder pod "+pod.Name+" is ready")
 			return r.updateStatus(ctx, logger, buildReq, ctrl.Result{RequeueAfter: requeueRunning})
 		}
 	}
@@ -247,7 +247,7 @@ func (r *NixBuildRequestReconciler) handleCompleted(ctx context.Context, logger 
 
 func (r *NixBuildRequestReconciler) fail(ctx context.Context, logger zerolog.Logger, buildReq *nixv1alpha1.NixBuildRequest, reason, message string) (ctrl.Result, error) {
 	logger.Warn().Str("reason", reason).Msg(message)
-	r.event(buildReq, corev1.EventTypeWarning, reason, message)
+	r.event(buildReq, corev1.EventTypeWarning, reason, "Reconcile", message)
 	buildReq.Status.Phase = nixv1alpha1.BuildPhaseFailed
 	buildReq.Status.CompletionTime = &metav1.Time{Time: time.Now()}
 	buildReq.Status.Message = message
@@ -314,9 +314,11 @@ func (r *NixBuildRequestReconciler) deleteBuilderPod(ctx context.Context, logger
 	return nil
 }
 
-func (r *NixBuildRequestReconciler) event(obj runtime.Object, eventType, reason, message string) {
+// event records a Kubernetes event on obj using the events/v1 API. action is the
+// operation being performed (a short verb), reason is a machine-readable cause.
+func (r *NixBuildRequestReconciler) event(obj runtime.Object, eventType, reason, action, message string) {
 	if r.Recorder != nil {
-		r.Recorder.Event(obj, eventType, reason, message)
+		r.Recorder.Eventf(obj, nil, eventType, reason, action, "%s", message)
 	}
 }
 

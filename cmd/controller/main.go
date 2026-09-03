@@ -109,7 +109,7 @@ var rootCmd = &cobra.Command{
 		reconciler := &controller.NixBuildRequestReconciler{
 			Client:                  mgr.GetClient(),
 			Scheme:                  mgr.GetScheme(),
-			Recorder:                mgr.GetEventRecorderFor("nix-remote-build-controller"),
+			Recorder:                mgr.GetEventRecorder("nix-remote-build-controller"),
 			BuilderImage:            builderImage,
 			BuilderImagePullPolicy:  pullPolicy,
 			RemotePort:              remotePort,

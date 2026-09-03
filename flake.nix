@@ -25,7 +25,7 @@
             pname = name;
             inherit version;
             src = ./.;
-            vendorHash = "sha256-1ZDYNbrB3ER8HrZ0NhoLluWkREc8zHw/8rzssrx70dQ=";
+            vendorHash = "sha256-e4dLY+rLKK2VxINuLQNADEK/dCTVGvd2OtRh7aUYycY=";
             subPackages = [ "cmd/${name}" ];
             ldflags = [
               "-s"

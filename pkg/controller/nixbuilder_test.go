@@ -12,7 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -35,7 +35,7 @@ func newScheme(t *testing.T) *runtime.Scheme {
 	return s
 }
 
-func newReconciler(t *testing.T, objs ...client.Object) (*NixBuildRequestReconciler, client.Client, *record.FakeRecorder) {
+func newReconciler(t *testing.T, objs ...client.Object) (*NixBuildRequestReconciler, client.Client, *events.FakeRecorder) {
 	t.Helper()
 	scheme := newScheme(t)
 	c := fake.NewClientBuilder().
@@ -43,7 +43,7 @@ func newReconciler(t *testing.T, objs ...client.Object) (*NixBuildRequestReconci
 		WithStatusSubresource(&nixv1alpha1.NixBuildRequest{}).
 		WithObjects(objs...).
 		Build()
-	rec := record.NewFakeRecorder(32)
+	rec := events.NewFakeRecorder(32)
 	r := &NixBuildRequestReconciler{
 		Client:                 c,
 		Scheme:                 scheme,
