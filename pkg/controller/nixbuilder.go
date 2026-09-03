@@ -57,6 +57,7 @@ const (
 
 	requeueCreating = 2 * time.Second
 	requeueRunning  = 30 * time.Second
+	requeueConflict = 100 * time.Millisecond
 )
 
 // NixBuildRequestReconciler reconciles NixBuildRequest objects.
@@ -267,8 +268,11 @@ func (r *NixBuildRequestReconciler) updateStatus(ctx context.Context, logger zer
 
 func (r *NixBuildRequestReconciler) retryOnConflict(logger zerolog.Logger, op string, err error) (ctrl.Result, error) {
 	if apierrors.IsConflict(err) {
+		// The object changed under us (for example the proxy's final status
+		// patch). Requeue promptly with a fresh read; this is expected, not an
+		// error, so it is not surfaced to the controller's error handler.
 		logger.Debug().Str("op", op).Msg("Conflict, requeuing")
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{RequeueAfter: requeueConflict}, nil
 	}
 	if apierrors.IsNotFound(err) {
 		return ctrl.Result{}, nil
@@ -330,9 +334,17 @@ func BuilderPodName(buildReq *nixv1alpha1.NixBuildRequest) string {
 
 // BuilderPod renders the pod for a request.
 func (r *NixBuildRequestReconciler) BuilderPod(buildReq *nixv1alpha1.NixBuildRequest) *corev1.Pod {
-	timeoutSeconds := DefaultBuildTimeoutSeconds
-	if buildReq.Spec.TimeoutSeconds != nil {
-		timeoutSeconds = max(*buildReq.Spec.TimeoutSeconds, 0)
+	// activeDeadlineSeconds must be a positive integer; Kubernetes rejects 0.
+	// A nil spec value falls back to the default; a value of zero or less is
+	// treated as "no deadline" (nil pointer).
+	var activeDeadline *int64
+	switch {
+	case buildReq.Spec.TimeoutSeconds == nil:
+		d := DefaultBuildTimeoutSeconds
+		activeDeadline = &d
+	case *buildReq.Spec.TimeoutSeconds > 0:
+		d := *buildReq.Spec.TimeoutSeconds
+		activeDeadline = &d
 	}
 	resources := buildReq.Spec.Resources
 	if len(resources.Requests) == 0 && len(resources.Limits) == 0 {
@@ -355,7 +367,7 @@ func (r *NixBuildRequestReconciler) BuilderPod(buildReq *nixv1alpha1.NixBuildReq
 		},
 		Spec: corev1.PodSpec{
 			RestartPolicy:                 corev1.RestartPolicyNever,
-			ActiveDeadlineSeconds:         &timeoutSeconds,
+			ActiveDeadlineSeconds:         activeDeadline,
 			TerminationGracePeriodSeconds: &grace,
 			NodeSelector:                  buildReq.Spec.NodeSelector,
 			ServiceAccountName:            r.BuilderServiceAccount,

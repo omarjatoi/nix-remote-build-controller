@@ -171,10 +171,17 @@ func TestPodSpecHonoursRequestOverrides(t *testing.T) {
 		t.Errorf("mounts = %v", mounts)
 	}
 
+	// A non-positive timeout means "no deadline"; Kubernetes rejects
+	// activeDeadlineSeconds=0, so the pointer must be nil rather than &0.
 	negative := int64(-5)
 	br.Spec.TimeoutSeconds = &negative
-	if got := *r.BuilderPod(br).Spec.ActiveDeadlineSeconds; got != 0 {
-		t.Errorf("negative timeout should clamp to 0, got %d", got)
+	if got := r.BuilderPod(br).Spec.ActiveDeadlineSeconds; got != nil {
+		t.Errorf("non-positive timeout should yield no deadline, got %v", *got)
+	}
+	zero := int64(0)
+	br.Spec.TimeoutSeconds = &zero
+	if got := r.BuilderPod(br).Spec.ActiveDeadlineSeconds; got != nil {
+		t.Errorf("zero timeout should yield no deadline, got %v", *got)
 	}
 }
 
