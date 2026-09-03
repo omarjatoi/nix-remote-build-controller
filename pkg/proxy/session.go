@@ -61,9 +61,10 @@ func (p *SSHProxy) createBuildRequest(ctx context.Context, session *Session) err
 			SessionID: session.ID,
 		},
 	}
-	if p.cfg.BuildTimeout > 0 {
-		timeout := int64(p.cfg.BuildTimeout / time.Second)
-		buildReq.Spec.TimeoutSeconds = &timeout
+	// Only set a whole-second, positive deadline; a sub-second BuildTimeout would
+	// truncate to 0, which the controller (and Kubernetes) treat as no deadline.
+	if seconds := int64(p.cfg.BuildTimeout / time.Second); seconds > 0 {
+		buildReq.Spec.TimeoutSeconds = &seconds
 	}
 	if p.cfg.OwnerPodName != "" && p.cfg.OwnerPodUID != "" {
 		buildReq.Annotations = map[string]string{AnnotationProxyPod: p.cfg.OwnerPodName}
@@ -150,29 +151,37 @@ func (p *SSHProxy) finalizeBuildRequest(logger zerolog.Logger, session *Session,
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: p.cfg.Namespace},
 	}
 
-	status := v1alpha1.NixBuildRequestStatus{
-		Phase:          v1alpha1.BuildPhaseCompleted,
-		Message:        "Build session completed",
-		CompletionTime: &metav1.Time{Time: time.Now()},
-	}
-	if result.Err != nil {
-		status.Phase = v1alpha1.BuildPhaseFailed
-		status.Message = "Build session failed: " + result.Err.Error()
-	} else if result.ExitStatus != nil && *result.ExitStatus != 0 {
-		status.Message = fmt.Sprintf("Build session completed, remote command exited with status %d", *result.ExitStatus)
+	// Record a terminal status only when there is something worth recording: a
+	// session failure, or a non-zero remote exit status. On a clean success the
+	// request is deleted immediately, so an extra status write is wasted work.
+	phase := v1alpha1.BuildPhaseCompleted
+	message := ""
+	switch {
+	case result.Err != nil:
+		phase = v1alpha1.BuildPhaseFailed
+		message = "Build session failed: " + result.Err.Error()
+	case result.ExitStatus != nil && *result.ExitStatus != 0:
+		message = fmt.Sprintf("Build session completed, remote command exited with status %d", *result.ExitStatus)
 	}
 
-	patch, err := json.Marshal(map[string]any{"status": status})
-	if err == nil {
-		err = p.k8sClient.Status().Patch(ctx, buildReq, client.RawPatch(types.MergePatchType, patch))
-	}
-	if err != nil && !apierrors.IsNotFound(err) {
-		logger.Warn().Err(err).Msg("Failed to record final NixBuildRequest status")
+	if message != "" {
+		status := v1alpha1.NixBuildRequestStatus{
+			Phase:          phase,
+			Message:        message,
+			CompletionTime: &metav1.Time{Time: time.Now()},
+		}
+		patch, err := json.Marshal(map[string]any{"status": status})
+		if err == nil {
+			err = p.k8sClient.Status().Patch(ctx, buildReq, client.RawPatch(types.MergePatchType, patch))
+		}
+		if err != nil && !apierrors.IsNotFound(err) {
+			logger.Warn().Err(err).Msg("Failed to record final NixBuildRequest status")
+		}
 	}
 
 	if err := p.k8sClient.Delete(ctx, buildReq); err != nil && !apierrors.IsNotFound(err) {
 		logger.Error().Err(err).Msg("Failed to delete NixBuildRequest; the controller will reap it after its TTL")
 		return
 	}
-	logger.Info().Str("phase", string(status.Phase)).Msg("NixBuildRequest finalized and deleted")
+	logger.Info().Str("phase", string(phase)).Msg("NixBuildRequest finalized and deleted")
 }

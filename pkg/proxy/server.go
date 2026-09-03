@@ -226,12 +226,12 @@ func (p *SSHProxy) Start(ctx context.Context) error {
 	sessionCtx, cancelSessions := context.WithCancel(context.Background())
 	defer cancelSessions()
 
-	acceptDone := make(chan error, 1)
+	acceptErr := make(chan error, 1)
 	go func() {
 		for {
 			conn, err := p.listener.Accept()
 			if err != nil {
-				acceptDone <- err
+				acceptErr <- err
 				return
 			}
 			p.activeConns.Add(1)
@@ -242,27 +242,33 @@ func (p *SSHProxy) Start(ctx context.Context) error {
 		}
 	}()
 
+	var startErr error
 	select {
 	case <-ctx.Done():
-		p.drain(cancelSessions, acceptDone)
-		return nil
-	case err := <-acceptDone:
 		p.shuttingDown.Store(true)
-		cancelSessions()
-		p.stopHealthServer()
-		return fmt.Errorf("accept: %w", err)
+		_ = p.listener.Close()
+		<-acceptErr // Close unblocks Accept; wait for the loop to exit so no Add races Wait.
+	case err := <-acceptErr:
+		// The listener failed on its own; still drain in-flight sessions.
+		p.shuttingDown.Store(true)
+		_ = p.listener.Close()
+		startErr = fmt.Errorf("accept: %w", err)
+		log.Error().Err(err).Msg("Listener failed, draining active sessions")
 	}
+
+	p.drainSessions(cancelSessions)
+	p.stopHealthServer()
+	return startErr
 }
 
-func (p *SSHProxy) drain(cancelSessions func(), acceptDone <-chan error) {
-	p.shuttingDown.Store(true)
-	_ = p.listener.Close()
-	<-acceptDone // the accept loop has exited, so no further activeConns.Add can race with Wait.
-
+// drainSessions waits for in-flight sessions to finish, up to ShutdownTimeout,
+// then force-cancels any that remain. It must be called after the listener is
+// closed and the accept loop has exited.
+func (p *SSHProxy) drainSessions(cancelSessions func()) {
 	log.Info().
 		Int("active_sessions", p.SessionCount()).
 		Dur("timeout", p.cfg.ShutdownTimeout).
-		Msg("Shutdown requested: not accepting new connections, draining active sessions")
+		Msg("Not accepting new connections, draining active sessions")
 
 	done := make(chan struct{})
 	go func() {
@@ -284,8 +290,6 @@ func (p *SSHProxy) drain(cancelSessions func(), acceptDone <-chan error) {
 			log.Error().Msg("Sessions did not terminate after forced cancellation")
 		}
 	}
-
-	p.stopHealthServer()
 }
 
 // handleConnection serves one SSH transport connection. Every session channel
@@ -352,11 +356,20 @@ func (p *SSHProxy) handleChannel(ctx context.Context, logger zerolog.Logger, new
 		_ = newChannel.Reject(ssh.UnknownChannelType, "only session channels are supported")
 		return
 	}
-	if p.cfg.MaxSessions > 0 && p.SessionCount() >= p.cfg.MaxSessions {
+
+	// Reserve a session slot before accepting the channel. The reservation is
+	// atomic with the concurrent-session count, so --max-sessions is a hard cap
+	// even when many channels open at once.
+	session := &Session{
+		ID:        generateSessionID(),
+		StartTime: time.Now(),
+	}
+	if !p.trackSession(session) {
 		logger.Warn().Int("max_sessions", p.cfg.MaxSessions).Msg("Rejecting session: concurrent session limit reached")
 		_ = newChannel.Reject(ssh.ResourceShortage, "too many concurrent build sessions")
 		return
 	}
+	defer p.untrackSession(session)
 
 	channel, requests, err := newChannel.Accept()
 	if err != nil {
@@ -364,13 +377,6 @@ func (p *SSHProxy) handleChannel(ctx context.Context, logger zerolog.Logger, new
 		return
 	}
 	defer func() { _ = channel.Close() }()
-
-	session := &Session{
-		ID:        generateSessionID(),
-		StartTime: time.Now(),
-	}
-	p.trackSession(session)
-	defer p.untrackSession(session)
 
 	logger = logger.With().Str("session_id", session.ID).Logger()
 	logger.Info().Int("active_sessions", p.SessionCount()).Msg("Build session opened")
@@ -402,10 +408,16 @@ func (p *SSHProxy) runSession(ctx context.Context, logger zerolog.Logger, sessio
 	return p.routeToBuilder(ctx, logger, session, channel, requests, podIP)
 }
 
-func (p *SSHProxy) trackSession(s *Session) {
+// trackSession registers a session, enforcing MaxSessions atomically. It returns
+// false (without registering) when the concurrent-session cap is reached.
+func (p *SSHProxy) trackSession(s *Session) bool {
 	p.sessionsMu.Lock()
 	defer p.sessionsMu.Unlock()
+	if p.cfg.MaxSessions > 0 && len(p.sessions) >= p.cfg.MaxSessions {
+		return false
+	}
 	p.sessions[s.ID] = s
+	return true
 }
 
 func (p *SSHProxy) untrackSession(s *Session) {
@@ -423,10 +435,14 @@ func shortID() string {
 }
 
 // keepalive sends OpenSSH-style keepalive requests. If the peer does not answer
-// within interval the connection is considered dead.
+// within interval the connection is considered dead. The SendRequest is issued
+// from a goroutine writing to a buffered channel, so it never leaks: it unblocks
+// when the connection is eventually closed.
 func keepalive(ctx context.Context, conn ssh.Conn, interval time.Duration, onDead func(error)) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	timeout := time.NewTimer(interval)
+	defer timeout.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -438,6 +454,13 @@ func keepalive(ctx context.Context, conn ssh.Conn, interval time.Duration, onDea
 			_, _, err := conn.SendRequest("keepalive@openssh.com", true, nil)
 			replied <- err
 		}()
+		if !timeout.Stop() {
+			select {
+			case <-timeout.C:
+			default:
+			}
+		}
+		timeout.Reset(interval)
 		select {
 		case <-ctx.Done():
 			return
@@ -446,7 +469,7 @@ func keepalive(ctx context.Context, conn ssh.Conn, interval time.Duration, onDea
 				onDead(fmt.Errorf("keepalive: %w", err))
 				return
 			}
-		case <-time.After(interval):
+		case <-timeout.C:
 			onDead(errors.New("keepalive: no reply"))
 			return
 		}

@@ -509,6 +509,38 @@ func TestBuildRequestCarriesTimeoutAndOwnerReference(t *testing.T) {
 	h.waitNoRequests(t)
 }
 
+func TestSubSecondBuildTimeoutSetsNoDeadline(t *testing.T) {
+	h := newHarness(t, harnessOpts{controllerMode: "never", cfg: func(c *Config) {
+		c.BuildTimeout = 500 * time.Millisecond // truncates to 0 seconds
+		c.PodReadyTimeout = 2 * time.Second
+	}})
+	c := h.dial(t)
+	sess, err := c.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = sess.Close() }()
+	if err := sess.Start("echo-upper"); err != nil {
+		t.Fatal(err)
+	}
+
+	var reqs []v1alpha1.NixBuildRequest
+	deadline := time.Now().Add(2 * time.Second)
+	for len(reqs) == 0 && time.Now().Before(deadline) {
+		reqs = h.listRequests(t)
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(reqs) != 1 {
+		t.Fatalf("expected one NixBuildRequest, got %d", len(reqs))
+	}
+	if reqs[0].Spec.TimeoutSeconds != nil {
+		t.Errorf("sub-second BuildTimeout must not set a (zero) deadline, got %d", *reqs[0].Spec.TimeoutSeconds)
+	}
+	_ = sess.Close()
+	_ = c.Close()
+	h.waitNoRequests(t)
+}
+
 func TestExitStatusIsPropagated(t *testing.T) {
 	h := newHarness(t, harnessOpts{})
 	c := h.dial(t)

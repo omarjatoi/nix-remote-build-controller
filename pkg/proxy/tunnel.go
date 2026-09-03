@@ -8,6 +8,7 @@ import (
 	"net"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -80,6 +81,7 @@ func (p *SSHProxy) routeToBuilder(ctx context.Context, logger zerolog.Logger, se
 	var (
 		wg          sync.WaitGroup
 		result      SessionResult
+		exitStatus  atomic.Pointer[uint32] // published by the builder-request goroutine
 		execStarted = make(chan struct{})
 		execOnce    sync.Once
 		clientDone  = make(chan struct{})
@@ -175,7 +177,7 @@ func (p *SSHProxy) routeToBuilder(ctx context.Context, logger zerolog.Logger, se
 				var msg exitStatusMsg
 				if ssh.Unmarshal(req.Payload, &msg) == nil {
 					status := msg.Status
-					result.ExitStatus = &status
+					exitStatus.Store(&status)
 				}
 			case "exit-signal":
 				var msg exitSignalMsg
@@ -231,6 +233,7 @@ func (p *SSHProxy) routeToBuilder(ctx context.Context, logger zerolog.Logger, se
 		logger.Warn().Msg("Tunnel goroutines did not finish promptly")
 	}
 
+	result.ExitStatus = exitStatus.Load()
 	if result.Err == nil {
 		copyErrMu.Lock()
 		result.Err = copyErr
