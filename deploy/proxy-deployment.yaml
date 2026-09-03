@@ -3,6 +3,8 @@ kind: Service
 metadata:
   name: proxy
   namespace: default
+  labels:
+    component: proxy
 spec:
   type: LoadBalancer
   ports:
@@ -18,8 +20,14 @@ kind: Deployment
 metadata:
   name: proxy
   namespace: default
+  labels:
+    component: proxy
 spec:
   replicas: 1
+  # Each proxy pod owns the NixBuildRequests it creates (via ownerReferences), so
+  # rolling a new pod in before the old one drains would orphan in-flight builds.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       component: proxy
@@ -29,6 +37,14 @@ spec:
         component: proxy
     spec:
       serviceAccountName: nix-remote-build-controller
+      # Give in-flight builds time to finish when the pod is deleted; must be >=
+      # the proxy's --shutdown-timeout.
+      terminationGracePeriodSeconds: 1830
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: proxy
           image: proxy
@@ -40,6 +56,22 @@ spec:
             - --remote-user=nixbld
             - --remote-port=22
             - --ssh-key-secret=nix-builder-ssh-keys
+            - --pod-ready-timeout=5m
+            - --build-timeout=1h
+            - --shutdown-timeout=30m
+            - --keepalive-interval=30s
+            - --log-level=info
+          env:
+            # Used to set ownerReferences on NixBuildRequests so they (and their
+            # builder pods) are garbage-collected if this proxy pod dies.
+            - name: PROXY_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: PROXY_POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
           ports:
             - containerPort: 2222
               name: ssh
@@ -57,6 +89,11 @@ spec:
               port: 8080
             initialDelaySeconds: 5
             periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
           resources:
             requests:
               cpu: 100m

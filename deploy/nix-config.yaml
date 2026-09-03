@@ -4,7 +4,19 @@ metadata:
   name: nix-builder-config
   namespace: default
 data:
+  # Mounted at /etc/nix/nix.conf inside every builder pod. These settings govern
+  # how much work a SINGLE builder pod does; they are unrelated to how many pods
+  # run concurrently (that is driven by the client's remote maxJobs; see README).
   nix.conf: |
+    experimental-features = nix-command flakes
     sandbox = false
     trusted-users = root nixbld
-    experimental-features = nix-command flakes
+    # One builder pod builds one derivation at a time for this proxy design, so
+    # local parallelism inside a pod comes from cores, not max-jobs.
+    max-jobs = 1
+    # 0 = use every core the pod is scheduled on (respects the CPU limit).
+    cores = 0
+    # Let builders fetch cached dependencies directly instead of copying every
+    # closure over the SSH link from the client.
+    substituters = https://cache.nixos.org
+    builders-use-substitutes = true

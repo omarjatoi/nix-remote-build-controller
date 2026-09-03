@@ -3,6 +3,8 @@ kind: Deployment
 metadata:
   name: controller
   namespace: default
+  labels:
+    component: controller
 spec:
   replicas: 1
   selector:
@@ -14,20 +16,35 @@ spec:
         component: controller
     spec:
       serviceAccountName: nix-remote-build-controller
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: controller
           image: controller
           imagePullPolicy: Always
           args:
             - --builder-image=ghcr.io/omarjatoi/nix-remote-build-controller/builder:latest
+            - --builder-image-pull-policy=Always
             - --remote-port=22
             - --nix-config=nix-builder-config
             - --ssh-key-secret=nix-builder-ssh-keys
+            - --namespace=default
+            - --builder-requests=cpu=1,memory=2Gi
+            - --builder-limits=cpu=4,memory=8Gi
+            - --max-concurrent-reconciles=10
+            - --completed-ttl=10m
             - --health-port=8081
+            - --metrics-addr=:8082
             - --shutdown-timeout=30s
+            - --log-level=info
           ports:
             - containerPort: 8081
               name: health
+            - containerPort: 8082
+              name: metrics
           livenessProbe:
             httpGet:
               path: /healthz
@@ -38,8 +55,13 @@ spec:
             httpGet:
               path: /readyz
               port: 8081
-            initialDelaySeconds: 10
+            initialDelaySeconds: 5
             periodSeconds: 15
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
           resources:
             requests:
               cpu: 100m

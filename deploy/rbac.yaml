@@ -9,15 +9,22 @@ kind: ClusterRole
 metadata:
   name: nix-remote-build-controller
 rules:
+  # Builder pods.
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch", "create", "delete"]
+  # nix.conf ConfigMap and SSH key Secret (read-only).
   - apiGroups: [""]
     resources: ["configmaps"]
-    verbs: ["get"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["get"]
+    verbs: ["get", "list", "watch"]
+  # Events emitted by the controller for observability.
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  # The NixBuildRequest custom resource and its status subresource.
   - apiGroups: ["nix.io"]
     resources: ["nixbuildrequests"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
@@ -33,6 +40,34 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: nix-remote-build-controller
+subjects:
+  - kind: ServiceAccount
+    name: nix-remote-build-controller
+    namespace: default
+---
+# Leader election lease, used only when the controller runs with --leader-elect.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: nix-remote-build-controller-leader-election
+  namespace: default
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: nix-remote-build-controller-leader-election
+  namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: nix-remote-build-controller-leader-election
 subjects:
   - kind: ServiceAccount
     name: nix-remote-build-controller

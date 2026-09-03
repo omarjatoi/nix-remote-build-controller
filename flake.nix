@@ -25,7 +25,7 @@
             pname = name;
             inherit version;
             src = ./.;
-            vendorHash = "sha256-Ua6i6574AG84UsyAIj/KL5yc0+4BVVy1eR+N98qpUkQ=";
+            vendorHash = "sha256-1ZDYNbrB3ER8HrZ0NhoLluWkREc8zHw/8rzssrx70dQ=";
             subPackages = [ "cmd/${name}" ];
             ldflags = [
               "-s"
@@ -62,7 +62,8 @@
 
           # Entrypoint script for builder container - runs setup at container start
           builder-entrypoint = pkgs.writeShellScriptBin "entrypoint" ''
-            set -e
+            set -euo pipefail
+            umask 022
 
             # Create necessary directories
             mkdir -p /etc/ssh /var/empty /home/nixbld/.ssh /home/nixbld/.cache/nix /tmp /run/sshd
@@ -83,30 +84,49 @@
             chown nixbld:nixbld /home/nixbld
             chown -R nixbld:nixbld /home/nixbld/.cache
 
-            # Generate host key if needed
-            if [ ! -f /etc/ssh/ssh_host_ed25519_key ]; then
-              ${pkgs.openssh}/bin/ssh-keygen -t ed25519 -f /etc/ssh/ssh_host_ed25519_key -N ""
+            # Host key: prefer one mounted read-only by the controller (so the proxy
+            # can verify it and clients see a stable key across pods); otherwise
+            # generate an ephemeral one. A read-only mount cannot be used directly by
+            # sshd, so copy it to a writable path.
+            HOST_KEY=/etc/ssh/ssh_host_ed25519_key
+            if [ -s "$HOST_KEY" ]; then
+              cp "$HOST_KEY" /tmp/ssh_host_ed25519_key
+              chmod 600 /tmp/ssh_host_ed25519_key
+              ${pkgs.openssh}/bin/ssh-keygen -y -f /tmp/ssh_host_ed25519_key > /tmp/ssh_host_ed25519_key.pub
+              HOST_KEY=/tmp/ssh_host_ed25519_key
+              echo "builder: using mounted host key ($(${pkgs.openssh}/bin/ssh-keygen -lf /tmp/ssh_host_ed25519_key.pub))"
+            else
+              HOST_KEY=/tmp/ssh_host_ed25519_key
+              ${pkgs.openssh}/bin/ssh-keygen -t ed25519 -f "$HOST_KEY" -N ""
+              echo "builder: generated ephemeral host key"
             fi
 
-            # Copy authorized_keys from mounted secret (read-only) to writable location
-            if [ -f /home/nixbld/.ssh/authorized_keys ]; then
+            # Copy authorized_keys from mounted secret (read-only) to a writable location
+            if [ -s /home/nixbld/.ssh/authorized_keys ]; then
               cp /home/nixbld/.ssh/authorized_keys /tmp/authorized_keys
               chmod 600 /tmp/authorized_keys
               chown nixbld:nixbld /tmp/authorized_keys
+            else
+              echo "builder: FATAL: no authorized_keys mounted at /home/nixbld/.ssh/authorized_keys" >&2
+              exit 1
             fi
 
             # Set up SSH config
             cat > /etc/ssh/sshd_config <<SSHD_CONFIG
-            HostKey /etc/ssh/ssh_host_ed25519_key
+            HostKey $HOST_KEY
             AuthorizedKeysFile /tmp/authorized_keys
             PasswordAuthentication no
+            PubkeyAuthentication yes
             PermitRootLogin no
             AllowUsers nixbld
+            AcceptEnv PATH
+            ClientAliveInterval 30
+            ClientAliveCountMax 4
             StrictModes no
             SSHD_CONFIG
 
-            # Start SSHD
-            exec ${pkgs.openssh}/bin/sshd -D -e
+            # Start SSHD in the foreground; -e logs to stderr so kubectl logs works.
+            exec ${pkgs.openssh}/bin/sshd -D -e -f /etc/ssh/sshd_config
           '';
 
           # Base system files for the builder container
@@ -134,7 +154,15 @@
                 self.packages.${system}.builder-entrypoint
                 self.packages.${system}.builder-etc
               ];
-              pathsToLink = [ "/bin" "/etc" "/share" "/root" "/home" "/tmp" "/var" ];
+              pathsToLink = [
+                "/bin"
+                "/etc"
+                "/share"
+                "/root"
+                "/home"
+                "/tmp"
+                "/var"
+              ];
             };
             config = {
               Entrypoint = [ "${self.packages.${system}.builder-entrypoint}/bin/entrypoint" ];
@@ -156,6 +184,13 @@
             go
             golangci-lint
             nixfmt
+            # End-to-end and manifest tooling.
+            kind
+            kubectl
+            kustomize
+            kubeconform
+            shellcheck
+            jq
           ];
         };
 
