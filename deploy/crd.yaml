@@ -118,6 +118,15 @@ spec:
           type: string
           description: Builder pod name
           jsonPath: .status.podName
+        - name: PodIP
+          type: string
+          description: Builder pod IP
+          jsonPath: .status.podIP
+        - name: Session
+          type: string
+          priority: 1
+          description: SSH proxy session ID
+          jsonPath: .spec.sessionId
         - name: Age
           type: date
           jsonPath: .metadata.creationTimestamp

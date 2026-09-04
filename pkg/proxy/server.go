@@ -1,255 +1,274 @@
+// Package proxy implements the SSH front door for Nix remote builds.
+//
+// A Nix client configured with a builder such as
+//
+//	ssh://nixbld@<proxy> x86_64-linux - 100 1
+//
+// runs one build-remote hook per derivation it wants built remotely. Each hook
+// opens its own SSH connection (or, with ControlMaster, its own channel on a
+// shared connection) and executes "nix-store --serve --write". The proxy treats
+// every session channel as an independent build session: it creates a
+// NixBuildRequest, waits for the controller to bring up a dedicated builder pod
+// and then splices the channel onto an SSH session on that pod. Sessions never
+// wait on each other, so independent derivations build concurrently as long as
+// the client advertises enough remote slots (the "100" above).
 package proxy
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/rsa"
-	"crypto/x509"
-	"encoding/pem"
+	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
-	"os"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/omarjatoi/nix-remote-build-controller/pkg/apis/nixbuilder/v1alpha1"
+	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/crypto/ssh"
-	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
+
+	"github.com/omarjatoi/nix-remote-build-controller/pkg/apis/nixbuilder/v1alpha1"
 )
 
-const (
-	// SSHKeySecretPrivateKey is the key in the secret containing the private key
-	SSHKeySecretPrivateKey = "private"
-	// SSHKeySecretPublicKey is the key in the secret containing the public key (authorized_keys)
-	SSHKeySecretPublicKey = "public"
-	// SSHKeySecretHostKey is the key in the secret containing the proxy's SSH host key
-	SSHKeySecretHostKey = "host-key"
-)
-
+// SSHProxy accepts SSH connections from Nix clients and routes every session
+// channel to a dynamically provisioned builder pod.
 type SSHProxy struct {
-	listener     net.Listener
-	hostKey      ssh.Signer
-	clientKey    ssh.Signer
-	sessions     map[string]*ProxySession
-	sessionsMux  sync.RWMutex
-	activeConns  sync.WaitGroup
-	shutdownChan chan struct{}
-	shutdownOnce sync.Once
-	k8sClient    client.Client
-	namespace    string
-	remoteUser   string
-	remotePort   int32
-	healthServer *http.Server
+	cfg              Config
+	listener         net.Listener
+	k8sClient        client.Client
+	sshConfig        *ssh.ServerConfig
+	builderClientKey ssh.Signer
+	builderHostKey   ssh.HostKeyCallback
+	healthServer     *http.Server
+
 	shuttingDown atomic.Bool
+	activeConns  sync.WaitGroup
+
+	sessionsMu sync.RWMutex
+	sessions   map[string]*Session
 }
 
-type ProxySession struct {
-	ID         string
-	SSHConn    ssh.Conn
-	BuilderPod string
-	Status     SessionStatus
-}
-
-type SessionStatus int
-
-const (
-	SessionPending SessionStatus = iota
-	SessionConnected
-	SessionClosed
-)
-
-func NewSSHProxy(ctx context.Context, addr, hostKeyPath, namespace, remoteUser string, remotePort int32, healthPort int, sshKeySecret string) (*SSHProxy, error) {
-	listener, err := net.Listen("tcp", addr)
-	if err != nil {
-		return nil, fmt.Errorf("failed to listen on %s: %w", addr, err)
+// New creates a proxy listening on cfg.ListenAddr.
+//
+// hostKey is presented to Nix clients. builderClientKey authenticates the proxy
+// to builder pods. clientAuth may be nil, in which case any client may connect;
+// that is only acceptable when network policy restricts who can reach the proxy.
+// builderHostKey may be nil to accept any builder host key.
+func New(cfg Config, k8sClient client.Client, hostKey, builderClientKey ssh.Signer, clientAuth *ClientAuthorizer, builderHostKey ssh.PublicKey) (*SSHProxy, error) {
+	cfg = cfg.withDefaults()
+	if k8sClient == nil {
+		return nil, errors.New("kubernetes client is required")
 	}
+	if hostKey == nil || builderClientKey == nil {
+		return nil, errors.New("host key and builder client key are required")
+	}
+
+	sshConfig := &ssh.ServerConfig{
+		ServerVersion: "SSH-2.0-nix-remote-build-proxy",
+	}
+	sshConfig.AddHostKey(hostKey)
+	if clientAuth != nil {
+		sshConfig.PublicKeyCallback = clientAuth.Callback
+	} else {
+		sshConfig.NoClientAuth = true
+	}
+
+	listener, err := net.Listen("tcp", cfg.ListenAddr)
+	if err != nil {
+		return nil, fmt.Errorf("listen on %s: %w", cfg.ListenAddr, err)
+	}
+
+	p := &SSHProxy{
+		cfg:              cfg,
+		listener:         listener,
+		k8sClient:        k8sClient,
+		sshConfig:        sshConfig,
+		builderClientKey: builderClientKey,
+		sessions:         make(map[string]*Session),
+	}
+	if builderHostKey != nil {
+		p.builderHostKey = ssh.FixedHostKey(builderHostKey)
+	} else {
+		p.builderHostKey = ssh.InsecureIgnoreHostKey() //nolint:gosec // pod-internal traffic; see README "Security"
+	}
+
+	if cfg.HealthAddr != "" {
+		if err := p.startHealthServer(cfg.HealthAddr); err != nil {
+			_ = listener.Close()
+			return nil, err
+		}
+	}
+
+	log.Info().
+		Str("address", listener.Addr().String()).
+		Bool("client_auth", clientAuth != nil).
+		Bool("builder_host_key_verification", builderHostKey != nil).
+		Int("max_sessions", cfg.MaxSessions).
+		Dur("pod_ready_timeout", cfg.PodReadyTimeout).
+		Dur("shutdown_timeout", cfg.ShutdownTimeout).
+		Msg("SSH proxy listening")
+	return p, nil
+}
+
+// NewFromCluster builds a proxy using in-cluster (or kubeconfig) credentials and
+// loads all key material from the SSH key secret.
+func NewFromCluster(ctx context.Context, cfg Config, hostKeyPath, sshKeySecret, clientAuthorizedKeysPath string) (*SSHProxy, error) {
+	cfg = cfg.withDefaults()
 
 	scheme := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
-		return nil, fmt.Errorf("failed to add client-go scheme: %w", err)
+		return nil, fmt.Errorf("add client-go scheme: %w", err)
 	}
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
-		return nil, fmt.Errorf("failed to add NixBuilder scheme: %w", err)
+		return nil, fmt.Errorf("add NixBuilder scheme: %w", err)
 	}
 
 	k8sConfig, err := config.GetConfig()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get Kubernetes config: %w", err)
+		return nil, fmt.Errorf("get Kubernetes config: %w", err)
 	}
-
-	k8sClient, err := client.New(k8sConfig, client.Options{
-		Scheme: scheme,
-	})
+	k8sClient, err := client.New(k8sConfig, client.Options{Scheme: scheme})
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Kubernetes client: %w", err)
+		return nil, fmt.Errorf("create Kubernetes client: %w", err)
 	}
 
-	// Load client key from user-provided secret
-	clientKey, err := loadClientKeyFromSecret(ctx, k8sClient, namespace, sshKeySecret)
+	secret, err := getSecret(ctx, k8sClient, cfg.Namespace, sshKeySecret)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load client key from secret %s: %w", sshKeySecret, err)
+		return nil, err
 	}
-	log.Info().Str("secret", sshKeySecret).Msg("Loaded SSH client key from secret")
 
-	// Load host key
+	builderClientKey, ok, err := signerFromSecret(secret, SSHKeySecretPrivateKey)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, fmt.Errorf("secret %s is missing required key %q", sshKeySecret, SSHKeySecretPrivateKey)
+	}
+	log.Info().Str("secret", sshKeySecret).Msg("Loaded builder SSH client key from secret")
+
 	var hostKey ssh.Signer
-	if hostKeyPath != "" {
+	switch {
+	case hostKeyPath != "":
 		hostKey, err = loadHostKey(hostKeyPath)
 		if err != nil {
-			return nil, fmt.Errorf("failed to load host key from %s: %w", hostKeyPath, err)
+			return nil, fmt.Errorf("load host key from %s: %w", hostKeyPath, err)
 		}
 		log.Info().Str("path", hostKeyPath).Msg("Loaded SSH host key from file")
-	} else {
-		// Try to load host key from secret
-		hostKey, err = loadHostKeyFromSecret(ctx, k8sClient, namespace, sshKeySecret)
+	default:
+		hostKey, ok, err = signerFromSecret(secret, SSHKeySecretHostKey)
 		if err != nil {
-			log.Warn().Err(err).Msg("No host key in secret, generating temporary key (host key will change on restart)")
+			return nil, err
+		}
+		if ok {
+			log.Info().Str("secret", sshKeySecret).Msg("Loaded SSH host key from secret")
+		} else {
+			log.Warn().Msgf("No %q entry in secret %s; generating an ephemeral host key (clients will see a changed host key after every restart)", SSHKeySecretHostKey, sshKeySecret)
 			hostKey, err = generateHostKey()
 			if err != nil {
-				return nil, fmt.Errorf("failed to generate host key: %w", err)
+				return nil, fmt.Errorf("generate host key: %w", err)
 			}
-		} else {
-			log.Info().Str("secret", sshKeySecret).Msg("Loaded SSH host key from secret")
 		}
 	}
 
-	proxy := &SSHProxy{
-		listener:     listener,
-		hostKey:      hostKey,
-		clientKey:    clientKey,
-		sessions:     make(map[string]*ProxySession),
-		shutdownChan: make(chan struct{}),
-		k8sClient:    k8sClient,
-		namespace:    namespace,
-		remoteUser:   remoteUser,
-		remotePort:   remotePort,
+	var builderHostKey ssh.PublicKey
+	if signer, ok, err := signerFromSecret(secret, SSHKeySecretBuilderHostKey); err != nil {
+		return nil, err
+	} else if ok {
+		builderHostKey = signer.PublicKey()
+		log.Info().Str("fingerprint", ssh.FingerprintSHA256(builderHostKey)).Msg("Builder host key verification enabled")
+	} else {
+		log.Warn().Msgf("No %q entry in secret %s; builder host keys will not be verified", SSHKeySecretBuilderHostKey, sshKeySecret)
 	}
 
-	if err := proxy.startHealthServer(healthPort); err != nil {
-		return nil, fmt.Errorf("failed to start health server: %w", err)
+	var clientAuth *ClientAuthorizer
+	switch {
+	case clientAuthorizedKeysPath != "":
+		clientAuth, err = LoadAuthorizedKeys(clientAuthorizedKeysPath)
+		if err != nil {
+			return nil, err
+		}
+		log.Info().Str("path", clientAuthorizedKeysPath).Int("keys", clientAuth.Len()).Msg("Client public key authentication enabled")
+	case len(secret.Data[SSHKeySecretClientAuthorizedKeys]) > 0:
+		clientAuth, err = ParseAuthorizedKeys(secret.Data[SSHKeySecretClientAuthorizedKeys])
+		if err != nil {
+			return nil, fmt.Errorf("parse %q from secret %s: %w", SSHKeySecretClientAuthorizedKeys, sshKeySecret, err)
+		}
+		log.Info().Str("secret", sshKeySecret).Int("keys", clientAuth.Len()).Msg("Client public key authentication enabled")
+	default:
+		log.Warn().Msg("Client authentication is DISABLED: anyone who can reach the proxy can start builder pods and run commands in them. Add a \"client-authorized-keys\" entry to the SSH key secret or pass --client-authorized-keys.")
 	}
 
-	log.Info().Str("address", addr).Msg("SSH proxy listening")
-	return proxy, nil
+	return New(cfg, k8sClient, hostKey, builderClientKey, clientAuth, builderHostKey)
 }
 
-func loadClientKeyFromSecret(ctx context.Context, k8sClient client.Client, namespace, secretName string) (ssh.Signer, error) {
-	var secret corev1.Secret
-	if err := k8sClient.Get(ctx, client.ObjectKey{
-		Namespace: namespace,
-		Name:      secretName,
-	}, &secret); err != nil {
-		return nil, fmt.Errorf("failed to get secret: %w", err)
-	}
+// Addr returns the address the proxy is listening on.
+func (p *SSHProxy) Addr() net.Addr { return p.listener.Addr() }
 
-	privateKeyBytes, ok := secret.Data[SSHKeySecretPrivateKey]
-	if !ok {
-		return nil, fmt.Errorf("secret %s missing required key '%s'", secretName, SSHKeySecretPrivateKey)
-	}
-
-	signer, err := ssh.ParsePrivateKey(privateKeyBytes)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse private key: %w", err)
-	}
-
-	return signer, nil
+// SessionCount returns the number of build sessions currently in flight.
+func (p *SSHProxy) SessionCount() int {
+	p.sessionsMu.RLock()
+	defer p.sessionsMu.RUnlock()
+	return len(p.sessions)
 }
 
-func loadHostKeyFromSecret(ctx context.Context, k8sClient client.Client, namespace, secretName string) (ssh.Signer, error) {
-	var secret corev1.Secret
-	if err := k8sClient.Get(ctx, client.ObjectKey{
-		Namespace: namespace,
-		Name:      secretName,
-	}, &secret); err != nil {
-		return nil, fmt.Errorf("failed to get secret: %w", err)
-	}
-
-	hostKeyBytes, ok := secret.Data[SSHKeySecretHostKey]
-	if !ok {
-		return nil, fmt.Errorf("secret %s missing key '%s'", secretName, SSHKeySecretHostKey)
-	}
-
-	signer, err := ssh.ParsePrivateKey(hostKeyBytes)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse host key: %w", err)
-	}
-
-	return signer, nil
-}
-
+// Start serves connections until ctx is cancelled, then drains in-flight
+// sessions for up to Config.ShutdownTimeout. It returns nil after a clean
+// shutdown and an error if the listener failed.
 func (p *SSHProxy) Start(ctx context.Context) error {
-	defer p.listener.Close()
+	// Sessions deliberately do not inherit ctx: a shutdown signal must stop new
+	// connections but let running builds finish within the drain window.
+	sessionCtx, cancelSessions := context.WithCancel(context.Background())
+	defer cancelSessions()
 
-	connChan := make(chan net.Conn)
-	errChan := make(chan error)
-
+	acceptErr := make(chan error, 1)
 	go func() {
 		for {
-			select {
-			case <-p.shutdownChan:
+			conn, err := p.listener.Accept()
+			if err != nil {
+				acceptErr <- err
 				return
-			default:
-				conn, err := p.listener.Accept()
-				if err != nil {
-					select {
-					case errChan <- err:
-					case <-p.shutdownChan:
-					}
-					return
-				}
-				select {
-				case connChan <- conn:
-				case <-p.shutdownChan:
-					conn.Close()
-					return
-				}
 			}
-		}
-	}()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return p.gracefulShutdown(ctx)
-		case err := <-errChan:
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			log.Error().Err(err).Msg("Failed to accept connection")
-			return err
-		case conn := <-connChan:
 			p.activeConns.Add(1)
 			go func() {
 				defer p.activeConns.Done()
-				p.handleConnection(ctx, conn)
+				p.handleConnection(sessionCtx, conn)
 			}()
 		}
+	}()
+
+	var startErr error
+	select {
+	case <-ctx.Done():
+		p.shuttingDown.Store(true)
+		_ = p.listener.Close()
+		<-acceptErr // Close unblocks Accept; wait for the loop to exit so no Add races Wait.
+	case err := <-acceptErr:
+		// The listener failed on its own; still drain in-flight sessions.
+		p.shuttingDown.Store(true)
+		_ = p.listener.Close()
+		startErr = fmt.Errorf("accept: %w", err)
+		log.Error().Err(err).Msg("Listener failed, draining active sessions")
 	}
+
+	p.drainSessions(cancelSessions)
+	p.stopHealthServer()
+	return startErr
 }
 
-func (p *SSHProxy) gracefulShutdown(ctx context.Context) error {
-	// Mark as unhealthy FIRST
-	p.shuttingDown.Store(true)
-	log.Info().Msg("Marked proxy as unhealthy, no new connections will be accepted")
-
-	p.shutdownOnce.Do(func() {
-		close(p.shutdownChan)
-	})
-
-	p.listener.Close()
-
-	log.Info().Int("active_connections", p.getActiveSessionCount()).Msg("Gracefully terminating, waiting for active connections to complete")
+// drainSessions waits for in-flight sessions to finish, up to ShutdownTimeout,
+// then force-cancels any that remain. It must be called after the listener is
+// closed and the accept loop has exited.
+func (p *SSHProxy) drainSessions(cancelSessions func()) {
+	log.Info().
+		Int("active_sessions", p.SessionCount()).
+		Dur("timeout", p.cfg.ShutdownTimeout).
+		Msg("Not accepting new connections, draining active sessions")
 
 	done := make(chan struct{})
 	go func() {
@@ -257,453 +276,245 @@ func (p *SSHProxy) gracefulShutdown(ctx context.Context) error {
 		close(done)
 	}()
 
+	timer := time.NewTimer(p.cfg.ShutdownTimeout)
+	defer timer.Stop()
 	select {
 	case <-done:
-		log.Info().Msg("All connections completed, terminating the proxy")
-	case <-ctx.Done():
-		log.Warn().Msg("Shutdown timeout reached, the proxy will be forcefully terminated")
-	}
-
-	// Shutdown health server last
-	if p.healthServer != nil {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := p.healthServer.Shutdown(shutdownCtx); err != nil {
-			log.Warn().Err(err).Msg("Health server shutdown failed")
-		} else {
-			log.Info().Msg("Health server shutdown completed")
+		log.Info().Msg("All sessions completed")
+	case <-timer.C:
+		log.Warn().Int("active_sessions", p.SessionCount()).Msg("Drain timeout reached, forcibly closing remaining sessions")
+		cancelSessions()
+		select {
+		case <-done:
+		case <-time.After(15 * time.Second):
+			log.Error().Msg("Sessions did not terminate after forced cancellation")
 		}
 	}
-
-	return ctx.Err()
 }
 
-func (p *SSHProxy) getActiveSessionCount() int {
-	p.sessionsMux.RLock()
-	defer p.sessionsMux.RUnlock()
-	return len(p.sessions)
-}
-
+// handleConnection serves one SSH transport connection. Every session channel
+// on it becomes an independent build session.
 func (p *SSHProxy) handleConnection(ctx context.Context, netConn net.Conn) {
-	defer netConn.Close()
+	defer func() { _ = netConn.Close() }()
 
-	config := &ssh.ServerConfig{
-		NoClientAuth: true, // TODO: adding ssh auth eventually might be a good idea
-	}
-	config.AddHostKey(p.hostKey)
-
-	sshConn, chans, reqs, err := ssh.NewServerConn(netConn, config)
+	_ = netConn.SetDeadline(time.Now().Add(p.cfg.HandshakeTimeout))
+	sshConn, chans, reqs, err := ssh.NewServerConn(netConn, p.sshConfig)
 	if err != nil {
-		log.Error().Err(err).Msg("Failed to create SSH connection")
+		log.Warn().Err(err).Str("client_addr", netConn.RemoteAddr().String()).Msg("SSH handshake failed")
 		return
 	}
-	defer sshConn.Close()
+	_ = netConn.SetDeadline(time.Time{})
+	defer func() { _ = sshConn.Close() }()
 
-	log.Info().Str("client_addr", sshConn.RemoteAddr().String()).Msg("New SSH connection")
+	logger := log.With().
+		Str("conn_id", shortID()).
+		Str("client_addr", sshConn.RemoteAddr().String()).
+		Str("client_version", string(sshConn.ClientVersion())).
+		Logger()
+	if sshConn.Permissions != nil {
+		if fp := sshConn.Permissions.Extensions[PermissionExtensionFingerprint]; fp != "" {
+			logger = logger.With().Str("client_key", fp).Logger()
+		}
+	}
+	logger.Info().Str("user", sshConn.User()).Msg("New SSH connection")
 
+	// connCtx is cancelled when the client goes away or the proxy is force-shut
+	// down; every session on this connection watches it.
+	connCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		<-connCtx.Done()
+		_ = sshConn.Close()
+	}()
+	go func() {
+		_ = sshConn.Wait()
+		cancel()
+	}()
 	go ssh.DiscardRequests(reqs)
+	if p.cfg.KeepaliveInterval > 0 {
+		go keepalive(connCtx, sshConn, p.cfg.KeepaliveInterval, func(err error) {
+			logger.Warn().Err(err).Msg("Client keepalive failed, closing connection")
+			cancel()
+		})
+	}
 
-	var channelWg sync.WaitGroup
+	var wg sync.WaitGroup
 	for newChannel := range chans {
-		channelWg.Add(1)
+		wg.Add(1)
 		go func(nc ssh.NewChannel) {
-			defer channelWg.Done()
-			p.handleChannel(ctx, sshConn, nc)
+			defer wg.Done()
+			p.handleChannel(connCtx, logger, nc)
 		}(newChannel)
 	}
-	channelWg.Wait()
+	wg.Wait()
+	logger.Info().Msg("SSH connection closed")
 }
 
-func (p *SSHProxy) handleChannel(ctx context.Context, sshConn ssh.Conn, newChannel ssh.NewChannel) {
+// handleChannel runs one build session on a freshly requested channel.
+func (p *SSHProxy) handleChannel(ctx context.Context, logger zerolog.Logger, newChannel ssh.NewChannel) {
 	if newChannel.ChannelType() != "session" {
-		newChannel.Reject(ssh.UnknownChannelType, "unknown channel type")
+		_ = newChannel.Reject(ssh.UnknownChannelType, "only session channels are supported")
 		return
 	}
+
+	// Reserve a session slot before accepting the channel. The reservation is
+	// atomic with the concurrent-session count, so --max-sessions is a hard cap
+	// even when many channels open at once.
+	session := &Session{
+		ID:        generateSessionID(),
+		StartTime: time.Now(),
+	}
+	if !p.trackSession(session) {
+		logger.Warn().Int("max_sessions", p.cfg.MaxSessions).Msg("Rejecting session: concurrent session limit reached")
+		_ = newChannel.Reject(ssh.ResourceShortage, "too many concurrent build sessions")
+		return
+	}
+	defer p.untrackSession(session)
 
 	channel, requests, err := newChannel.Accept()
 	if err != nil {
-		log.Error().Err(err).Msg("Failed to accept channel")
+		logger.Error().Err(err).Msg("Failed to accept channel")
 		return
 	}
-	defer channel.Close()
+	defer func() { _ = channel.Close() }()
 
-	sessionID := generateSessionID()
-	session := &ProxySession{
-		ID:      sessionID,
-		SSHConn: sshConn,
-		Status:  SessionConnected,
-	}
+	logger = logger.With().Str("session_id", session.ID).Logger()
+	logger.Info().Int("active_sessions", p.SessionCount()).Msg("Build session opened")
 
-	p.sessionsMux.Lock()
-	p.sessions[sessionID] = session
-	p.sessionsMux.Unlock()
-	defer func() {
-		p.sessionsMux.Lock()
-		delete(p.sessions, sessionID)
-		p.sessionsMux.Unlock()
-	}()
+	result := p.runSession(ctx, logger, session, channel, requests)
+	p.finalizeBuildRequest(logger, session, result)
 
-	log.Info().Str("session_id", session.ID).Msg("Handling SSH session channel")
+	logger.Info().
+		Bool("succeeded", result.Err == nil).
+		Dur("duration", time.Since(session.StartTime)).
+		Msg("Build session closed")
+}
 
+func (p *SSHProxy) runSession(ctx context.Context, logger zerolog.Logger, session *Session, channel ssh.Channel, requests <-chan *ssh.Request) SessionResult {
 	if err := p.createBuildRequest(ctx, session); err != nil {
-		log.Error().Err(err).Str("session_id", session.ID).Msg("Failed to create build request")
-		return
+		logger.Error().Err(err).Msg("Failed to create NixBuildRequest")
+		failClient(channel, requests, "failed to create NixBuildRequest: "+err.Error())
+		return SessionResult{Err: err}
 	}
+	session.Created = true
 
-	// Track build outcome for cleanup
-	var buildSucceeded bool
-	var buildError error
-
-	defer func() {
-		// Update status and delete the build request when the session ends
-		p.completeBuildRequest(session.ID, buildSucceeded, buildError)
-	}()
-
-	podIP, err := p.waitForBuilderPod(ctx, session)
+	podIP, err := p.waitForBuilderPod(ctx, logger, session)
 	if err != nil {
-		log.Error().Err(err).Str("session_id", session.ID).Msg("Failed to get builder pod")
-		buildError = err
-		return
+		logger.Error().Err(err).Msg("Builder pod did not become ready")
+		failClient(channel, requests, "builder pod did not become ready: "+err.Error())
+		return SessionResult{Err: err}
 	}
 
-	buildError = p.routeToBuilder(ctx, session, channel, requests, podIP)
-	if buildError != nil {
-		log.Error().Err(buildError).Str("session_id", session.ID).Msg("Failed to route to builder")
-	} else {
-		buildSucceeded = true
-	}
+	return p.routeToBuilder(ctx, logger, session, channel, requests, podIP)
 }
 
-func (p *SSHProxy) createBuildRequest(ctx context.Context, session *ProxySession) error {
-	buildReq := &v1alpha1.NixBuildRequest{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      fmt.Sprintf("build-%s", session.ID),
-			Namespace: p.namespace,
-		},
-		Spec: v1alpha1.NixBuildRequestSpec{
-			SessionID: session.ID,
-		},
+// trackSession registers a session, enforcing MaxSessions atomically. It returns
+// false (without registering) when the concurrent-session cap is reached.
+func (p *SSHProxy) trackSession(s *Session) bool {
+	p.sessionsMu.Lock()
+	defer p.sessionsMu.Unlock()
+	if p.cfg.MaxSessions > 0 && len(p.sessions) >= p.cfg.MaxSessions {
+		return false
 	}
-
-	if err := p.k8sClient.Create(ctx, buildReq); err != nil {
-		return fmt.Errorf("failed to create NixBuildRequest: %w", err)
-	}
-
-	log.Info().Str("session_id", session.ID).Msg("Created NixBuildRequest")
-	return nil
+	p.sessions[s.ID] = s
+	return true
 }
 
-func (p *SSHProxy) completeBuildRequest(sessionID string, succeeded bool, buildErr error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	buildReqName := fmt.Sprintf("build-%s", sessionID)
-	var buildReq v1alpha1.NixBuildRequest
-
-	if err := p.k8sClient.Get(ctx, client.ObjectKey{
-		Namespace: p.namespace,
-		Name:      buildReqName,
-	}, &buildReq); err != nil {
-		log.Error().Err(err).Str("session_id", sessionID).Msg("Failed to get build request for completion")
-		return
-	}
-
-	now := metav1.Now()
-	if succeeded {
-		buildReq.Status.Phase = v1alpha1.BuildPhaseCompleted
-		buildReq.Status.Message = "Build completed successfully"
-	} else {
-		buildReq.Status.Phase = v1alpha1.BuildPhaseFailed
-		if buildErr != nil {
-			buildReq.Status.Message = fmt.Sprintf("Build failed: %v", buildErr)
-		} else {
-			buildReq.Status.Message = "Build failed"
-		}
-	}
-	buildReq.Status.CompletionTime = &now
-
-	if err := p.k8sClient.Status().Update(ctx, &buildReq); err != nil {
-		log.Error().Err(err).Str("session_id", sessionID).Msg("Failed to update build request status")
-	}
-
-	if err := p.k8sClient.Delete(ctx, &buildReq); err != nil {
-		log.Error().Err(err).Str("session_id", sessionID).Msg("Failed to delete build request")
-	}
-
-	log.Info().
-		Str("session_id", sessionID).
-		Bool("succeeded", succeeded).
-		Msg("Build request completed and marked for deletion")
-}
-
-func (p *SSHProxy) waitForBuilderPod(ctx context.Context, session *ProxySession) (string, error) {
-	buildReqName := fmt.Sprintf("build-%s", session.ID)
-
-	timer := time.NewTimer(time.Minute * 2)
-	defer timer.Stop()
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return "", ctx.Err()
-		case <-timer.C:
-			return "", fmt.Errorf("timeout waiting for builder pod")
-		case <-ticker.C:
-			var buildReq v1alpha1.NixBuildRequest
-			if err := p.k8sClient.Get(ctx, client.ObjectKey{
-				Namespace: p.namespace,
-				Name:      buildReqName,
-			}, &buildReq); err != nil {
-				if apierrors.IsNotFound(err) {
-					continue
-				}
-				return "", fmt.Errorf("failed to read build request %s: %w", buildReqName, err)
-			}
-
-			if buildReq.Status.Phase == v1alpha1.BuildPhaseFailed {
-				if buildReq.Status.Message != "" {
-					return "", fmt.Errorf("build request failed before pod became ready: %s", buildReq.Status.Message)
-				}
-				return "", fmt.Errorf("build request failed before pod became ready")
-			}
-
-			if buildReq.Status.Phase == v1alpha1.BuildPhaseCompleted {
-				return "", fmt.Errorf("build request completed before pod became ready")
-			}
-
-			if buildReq.DeletionTimestamp != nil {
-				return "", fmt.Errorf("build request was deleted before pod became ready")
-			}
-
-			if buildReq.Status.Phase == v1alpha1.BuildPhaseRunning && buildReq.Status.PodIP != "" {
-				log.Info().Str("session_id", session.ID).Str("pod_ip", buildReq.Status.PodIP).Msg("Builder pod ready")
-				return buildReq.Status.PodIP, nil
-			}
-		}
-	}
-}
-
-func (p *SSHProxy) routeToBuilder(ctx context.Context, session *ProxySession, channel ssh.Channel, requests <-chan *ssh.Request, podIP string) error {
-	builderAddr := fmt.Sprintf("%s:%d", podIP, p.remotePort)
-
-	builderConn, err := ssh.Dial("tcp", builderAddr, &ssh.ClientConfig{
-		User:            p.remoteUser,
-		Auth:            []ssh.AuthMethod{ssh.PublicKeys(p.clientKey)},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-		Timeout:         time.Second * 10,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to connect to builder pod: %w", err)
-	}
-	defer builderConn.Close()
-
-	builderChannel, builderRequests, err := builderConn.OpenChannel("session", nil)
-	if err != nil {
-		return fmt.Errorf("failed to open channel on builder: %w", err)
-	}
-	defer builderChannel.Close()
-
-	log.Info().Str("session_id", session.ID).Str("builder_addr", builderAddr).Msg("Connected to builder pod")
-
-	tunnelCtx, tunnelCancel := context.WithCancel(ctx)
-	defer tunnelCancel()
-
-	var cancelOnce sync.Once
-	cancelTunnel := func() { cancelOnce.Do(tunnelCancel) }
-
-	var wg sync.WaitGroup
-
-	errChan := make(chan error, 4)
-
-	go func() {
-		<-tunnelCtx.Done()
-		channel.Close()
-		builderChannel.Close()
-	}()
-
-	// Forward requests: client -> builder
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		p.forwardRequests(tunnelCtx, requests, builderChannel, session.ID, "client->builder", cancelTunnel)
-	}()
-
-	// Forward requests: builder -> client
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		p.forwardRequests(tunnelCtx, builderRequests, channel, session.ID, "builder->client", cancelTunnel)
-	}()
-
-	// Forward data: client -> builder
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		n, err := io.Copy(builderChannel, channel)
-		log.Debug().Str("session_id", session.ID).Int64("bytes", n).Err(err).Msg("client->builder copy finished")
-		if err != nil && err != io.EOF && tunnelCtx.Err() == nil {
-			select {
-			case errChan <- fmt.Errorf("client->builder copy: %w", err):
-			default:
-			}
-			cancelTunnel()
-		}
-		if cw, ok := builderChannel.(interface{ CloseWrite() error }); ok {
-			cw.CloseWrite()
-		}
-	}()
-
-	// Forward stdout: builder -> client
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		n, err := io.Copy(channel, builderChannel)
-		log.Debug().Str("session_id", session.ID).Int64("bytes", n).Err(err).Msg("builder->client stdout copy finished")
-		if err != nil && err != io.EOF && tunnelCtx.Err() == nil {
-			select {
-			case errChan <- fmt.Errorf("builder->client copy: %w", err):
-			default:
-			}
-		}
-		cancelTunnel()
-		if cw, ok := channel.(interface{ CloseWrite() error }); ok {
-			cw.CloseWrite()
-		}
-	}()
-
-	// Forward stderr: builder -> client
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		n, err := io.Copy(channel.Stderr(), builderChannel.Stderr())
-		log.Debug().Str("session_id", session.ID).Int64("bytes", n).Err(err).Msg("builder->client stderr copy finished")
-		if err != nil && err != io.EOF && tunnelCtx.Err() == nil {
-			select {
-			case errChan <- fmt.Errorf("builder->client stderr: %w", err):
-			default:
-			}
-		}
-	}()
-
-	wg.Wait()
-	cancelTunnel()
-
-	select {
-	case err := <-errChan:
-		log.Debug().Str("session_id", session.ID).Err(err).Msg("Build session ended with error")
-		return err
-	default:
-		log.Info().Str("session_id", session.ID).Str("builder_addr", builderAddr).Msg("Build session completed successfully")
-		return nil
-	}
-}
-
-func (p *SSHProxy) forwardRequests(ctx context.Context, src <-chan *ssh.Request, dst ssh.Channel, sessionID, direction string, cancel func()) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case req, ok := <-src:
-			if !ok {
-				return
-			}
-
-			log.Debug().
-				Str("session_id", sessionID).
-				Str("request_type", req.Type).
-				Str("direction", direction).
-				Bool("want_reply", req.WantReply).
-				Msg("Forwarding SSH request")
-
-			accepted, err := dst.SendRequest(req.Type, req.WantReply, req.Payload)
-			if err != nil {
-				log.Debug().
-					Err(err).
-					Str("session_id", sessionID).
-					Str("request_type", req.Type).
-					Str("direction", direction).
-					Msg("Request forward failed")
-				if req.WantReply {
-					req.Reply(false, nil)
-				}
-				cancel()
-				return
-			}
-			if req.WantReply {
-				req.Reply(accepted, nil)
-			}
-		}
-	}
-}
-
-func generateHostKey() (ssh.Signer, error) {
-	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		return nil, err
-	}
-
-	privateKeyPEM := &pem.Block{
-		Type:  "RSA PRIVATE KEY",
-		Bytes: x509.MarshalPKCS1PrivateKey(privateKey),
-	}
-
-	privateKeyBytes := pem.EncodeToMemory(privateKeyPEM)
-	return ssh.ParsePrivateKey(privateKeyBytes)
-}
-
-func loadHostKey(path string) (ssh.Signer, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-
-	keyBytes, err := io.ReadAll(file)
-	if err != nil {
-		return nil, err
-	}
-
-	return ssh.ParsePrivateKey(keyBytes)
+func (p *SSHProxy) untrackSession(s *Session) {
+	p.sessionsMu.Lock()
+	defer p.sessionsMu.Unlock()
+	delete(p.sessions, s.ID)
 }
 
 func generateSessionID() string {
 	return uuid.Must(uuid.NewV7()).String()
 }
 
-func (p *SSHProxy) startHealthServer(port int) error {
-	mux := http.NewServeMux()
+func shortID() string {
+	return uuid.Must(uuid.NewV7()).String()[24:]
+}
 
-	// Liveness probe - "is the process running?"
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("ok"))
-	})
-
-	// Readiness probe - "can you handle new requests?"
-	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
-		if p.shuttingDown.Load() {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			w.Write([]byte("shutting down"))
+// keepalive sends OpenSSH-style keepalive requests. If the peer does not answer
+// within interval the connection is considered dead. The SendRequest is issued
+// from a goroutine writing to a buffered channel, so it never leaks: it unblocks
+// when the connection is eventually closed.
+func keepalive(ctx context.Context, conn ssh.Conn, interval time.Duration, onDead func(error)) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	timeout := time.NewTimer(interval)
+	defer timeout.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		replied := make(chan error, 1)
+		go func() {
+			_, _, err := conn.SendRequest("keepalive@openssh.com", true, nil)
+			replied <- err
+		}()
+		if !timeout.Stop() {
+			select {
+			case <-timeout.C:
+			default:
+			}
+		}
+		timeout.Reset(interval)
+		select {
+		case <-ctx.Done():
+			return
+		case err := <-replied:
+			if err != nil {
+				onDead(fmt.Errorf("keepalive: %w", err))
+				return
+			}
+		case <-timeout.C:
+			onDead(errors.New("keepalive: no reply"))
 			return
 		}
+	}
+}
 
+func (p *SSHProxy) startHealthServer(addr string) error {
+	mux := http.NewServeMux()
+	// Liveness: the process is running.
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("ready"))
+		_, _ = w.Write([]byte("ok"))
+	})
+	// Readiness: accepting new connections.
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
+		if p.shuttingDown.Load() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte("shutting down"))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ready"))
 	})
 
-	p.healthServer = &http.Server{
-		Addr:    fmt.Sprintf(":%d", port),
-		Handler: mux,
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("listen health server on %s: %w", addr, err)
 	}
-
+	p.healthServer = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() {
-		log.Info().Int("port", port).Msg("Health server starting")
-		if err := p.healthServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Info().Str("address", ln.Addr().String()).Msg("Health server starting")
+		if err := p.healthServer.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Error().Err(err).Msg("Health server failed")
 		}
 	}()
-
 	return nil
+}
+
+func (p *SSHProxy) stopHealthServer() {
+	if p.healthServer == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := p.healthServer.Shutdown(ctx); err != nil {
+		log.Warn().Err(err).Msg("Health server shutdown failed")
+	}
 }

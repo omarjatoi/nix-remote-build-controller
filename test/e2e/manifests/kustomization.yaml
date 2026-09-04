@@ -1,0 +1,71 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Overlay for the Kind-based end-to-end test. Images are built locally and loaded
+# into the Kind node with `kind load`, so pods must never try to pull them, and
+# the proxy is reached with kubectl port-forward instead of a LoadBalancer.
+resources:
+  - ../../../deploy
+
+# The base kustomization already renames the bare "controller"/"proxy"/"builder"
+# names to their full ghcr paths with tag "latest"; match those full names here
+# to retag them to "e2e" (the tag we load into Kind).
+images:
+  - name: ghcr.io/omarjatoi/nix-remote-build-controller/controller
+    newTag: e2e
+  - name: ghcr.io/omarjatoi/nix-remote-build-controller/proxy
+    newTag: e2e
+
+patches:
+  - target:
+      kind: Deployment
+      name: controller
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: IfNotPresent
+      - op: replace
+        path: /spec/template/spec/containers/0/args
+        value:
+          - --builder-image=ghcr.io/omarjatoi/nix-remote-build-controller/builder:e2e
+          - --builder-image-pull-policy=IfNotPresent
+          - --remote-port=22
+          - --nix-config=nix-builder-config
+          - --ssh-key-secret=nix-builder-ssh-keys
+          - --namespace=default
+          - --builder-requests=cpu=250m,memory=512Mi
+          - --builder-limits=cpu=2,memory=2Gi
+          - --max-concurrent-reconciles=10
+          - --completed-ttl=2m
+          - --health-port=8081
+          - --metrics-addr=:8082
+          - --shutdown-timeout=30s
+          - --log-level=debug
+  - target:
+      kind: Deployment
+      name: proxy
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: IfNotPresent
+      - op: replace
+        path: /spec/template/spec/containers/0/args
+        value:
+          - --port=2222
+          - --health-port=8080
+          - --namespace=default
+          - --remote-user=nixbld
+          - --remote-port=22
+          - --ssh-key-secret=nix-builder-ssh-keys
+          - --pod-ready-timeout=3m
+          - --build-timeout=20m
+          - --shutdown-timeout=2m
+          - --keepalive-interval=15s
+          - --log-level=debug
+  - target:
+      kind: Service
+      name: proxy
+    patch: |-
+      - op: replace
+        path: /spec/type
+        value: ClusterIP

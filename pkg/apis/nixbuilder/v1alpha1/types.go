@@ -10,10 +10,10 @@ import (
 // NixBuildRequest represents a request for a Nix build that needs a dedicated builder pod
 type NixBuildRequest struct {
 	metav1.TypeMeta   `json:",inline"`
-	metav1.ObjectMeta `json:"metadata"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
 
 	Spec   NixBuildRequestSpec   `json:"spec"`
-	Status NixBuildRequestStatus `json:"status"`
+	Status NixBuildRequestStatus `json:"status,omitempty"`
 }
 
 // NixBuildRequestSpec defines the desired state of a Nix build request
@@ -103,7 +103,7 @@ const (
 // NixBuildRequestList contains a list of NixBuildRequest
 type NixBuildRequestList struct {
 	metav1.TypeMeta `json:",inline"`
-	metav1.ListMeta `json:"metadata"`
+	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []NixBuildRequest `json:"items"`
 }
 
