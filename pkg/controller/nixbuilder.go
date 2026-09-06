@@ -187,15 +187,21 @@ func (r *NixBuildRequestReconciler) handleCreating(ctx context.Context, logger z
 		return r.fail(ctx, logger, buildReq, "PodFailed", "Builder pod failed before it became ready: "+podFailureReason(pod))
 	case corev1.PodSucceeded:
 		return r.fail(ctx, logger, buildReq, "PodExited", "Builder pod exited before it became ready")
-	case corev1.PodRunning:
-		if pod.Status.PodIP != "" && isPodReady(pod) {
-			buildReq.Status.Phase = nixv1alpha1.BuildPhaseRunning
-			buildReq.Status.PodIP = pod.Status.PodIP
-			buildReq.Status.Message = "Builder pod ready for connections"
-			logger.Info().Str("pod", pod.Name).Str("pod_ip", pod.Status.PodIP).Msg("Builder pod ready")
-			r.event(buildReq, corev1.EventTypeNormal, "PodReady", "AwaitReady", "Builder pod "+pod.Name+" is ready")
-			return r.updateStatus(ctx, logger, buildReq, ctrl.Result{RequeueAfter: requeueRunning})
-		}
+	}
+
+	// Publish the pod IP as soon as the network sandbox has one, without
+	// waiting for the readiness probe. The proxy retries its SSH dial until
+	// the builder's sshd answers, so that dial *is* the readiness check;
+	// gating here would only add the probe period plus a kubelet status
+	// round-trip to every session. The probe stays on the pod as an
+	// observability signal, but nothing blocks on it.
+	if pod.Status.PodIP != "" {
+		buildReq.Status.Phase = nixv1alpha1.BuildPhaseRunning
+		buildReq.Status.PodIP = pod.Status.PodIP
+		buildReq.Status.Message = "Builder pod has an IP; proxy will dial until sshd answers"
+		logger.Info().Str("pod", pod.Name).Str("pod_ip", pod.Status.PodIP).Msg("Builder pod ready")
+		r.event(buildReq, corev1.EventTypeNormal, "PodReady", "AwaitReady", "Builder pod "+pod.Name+" has IP "+pod.Status.PodIP)
+		return r.updateStatus(ctx, logger, buildReq, ctrl.Result{RequeueAfter: requeueRunning})
 	}
 
 	// Still starting: surface scheduling / image pull problems to the proxy logs.
@@ -383,11 +389,14 @@ func (r *NixBuildRequestReconciler) BuilderPod(buildReq *nixv1alpha1.NixBuildReq
 					Protocol:      corev1.ProtocolTCP,
 				}},
 				Resources: resources,
+				// Nothing blocks on this probe: the proxy dials the pod as soon
+				// as it has an IP. It is kept so `kubectl get pods` reports
+				// something meaningful, hence no initial delay.
 				ReadinessProbe: &corev1.Probe{
 					ProbeHandler: corev1.ProbeHandler{
 						TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(r.RemotePort)},
 					},
-					InitialDelaySeconds: 1,
+					InitialDelaySeconds: 0,
 					PeriodSeconds:       1,
 					FailureThreshold:    60,
 				},
@@ -454,16 +463,6 @@ func (r *NixBuildRequestReconciler) builderImage(buildReq *nixv1alpha1.NixBuildR
 		return buildReq.Spec.Image
 	}
 	return r.BuilderImage
-}
-
-// isPodReady reports whether all containers in the pod are ready.
-func isPodReady(pod *corev1.Pod) bool {
-	for _, cond := range pod.Status.Conditions {
-		if cond.Type == corev1.ContainersReady && cond.Status == corev1.ConditionTrue {
-			return true
-		}
-	}
-	return false
 }
 
 // podPendingReason summarises why a pod has not become ready yet.

@@ -76,10 +76,11 @@
             echo 'sshd:x:999:' >> /etc/group
             echo 'nixbld:x:1000:nixbld' >> /etc/group
 
-            # Give nixbld ownership of the nix store (single-user mode)
+            # Give nixbld ownership of the nix store (single-user mode).
             mkdir -p /nix/var/nix/db /nix/var/nix/gcroots /nix/var/nix/profiles /nix/var/nix/temproots
             chmod 1775 /nix/store
-            chown -R nixbld:nixbld /nix/store /nix/var
+            chown nixbld:nixbld /nix/store
+            chown -R nixbld:nixbld /nix/var
             # chown home without -R to avoid the read-only secret mount at .ssh/authorized_keys
             chown nixbld:nixbld /home/nixbld
             chown -R nixbld:nixbld /home/nixbld/.cache
@@ -144,6 +145,7 @@
           builder-image = pkgs.dockerTools.buildImage {
             name = "ghcr.io/omarjatoi/nix-remote-build-controller/builder";
             tag = "latest";
+            includeNixDB = true;
             copyToRoot = pkgs.buildEnv {
               name = "builder-root";
               paths = [

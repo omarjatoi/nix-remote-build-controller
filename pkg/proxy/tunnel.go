@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -42,12 +44,12 @@ type exitSignalMsg struct {
 func (p *SSHProxy) routeToBuilder(ctx context.Context, logger zerolog.Logger, session *Session, clientCh ssh.Channel, clientReqs <-chan *ssh.Request, podIP string) SessionResult {
 	builderAddr := net.JoinHostPort(podIP, strconv.Itoa(int(p.cfg.RemotePort)))
 
-	builderConn, err := dialSSH(ctx, builderAddr, &ssh.ClientConfig{
+	builderConn, err := dialBuilder(ctx, logger, builderAddr, &ssh.ClientConfig{
 		User:            p.cfg.RemoteUser,
 		Auth:            []ssh.AuthMethod{ssh.PublicKeys(p.builderClientKey)},
 		HostKeyCallback: p.builderHostKey,
 		Timeout:         p.cfg.BuilderDialTimeout,
-	})
+	}, p.cfg.BuilderDialTimeout)
 	if err != nil {
 		err = fmt.Errorf("connect to builder pod %s: %w", builderAddr, err)
 		failClient(clientCh, clientReqs, err.Error())
@@ -249,6 +251,73 @@ func (p *SSHProxy) routeToBuilder(ctx context.Context, logger zerolog.Logger, se
 	}
 	evt.Msg("Tunnel closed")
 	return result
+}
+
+// Bounds for the builder dial retry. The builder pod is handed to the proxy as
+// soon as it has an IP, so the first attempts routinely land before sshd has
+// bound its port; retrying quickly is what turns the dial into the readiness
+// check. The cap keeps a slow-starting pod from being hammered.
+const (
+	builderDialRetryInitial = 10 * time.Millisecond
+	builderDialRetryMax     = 50 * time.Millisecond
+)
+
+// dialBuilder connects to a builder pod, retrying while the pod is still coming
+// up. The controller publishes the pod IP before sshd is listening, so
+// "connection refused" is the expected state for the first few attempts rather
+// than an error. Failures that will not fix themselves — a rejected key, a host
+// key mismatch — are returned immediately instead of being retried until the
+// timeout.
+func dialBuilder(ctx context.Context, logger zerolog.Logger, addr string, cfg *ssh.ClientConfig, timeout time.Duration) (*ssh.Client, error) {
+	deadline := time.Now().Add(timeout)
+	backoff := builderDialRetryInitial
+	attempts := 0
+
+	for {
+		attempts++
+		client, err := dialSSH(ctx, addr, cfg)
+		if err == nil {
+			if attempts > 1 {
+				logger.Debug().Int("attempts", attempts).Str("addr", addr).Msg("Builder accepted connection after retrying")
+			}
+			return client, nil
+		}
+		if ctx.Err() != nil {
+			return nil, err
+		}
+		if !isBuilderNotUpYet(err) {
+			return nil, err
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("after %d attempts over %s: %w", attempts, timeout, err)
+		}
+
+		select {
+		case <-ctx.Done():
+			return nil, err
+		case <-time.After(backoff):
+		}
+		if backoff *= 2; backoff > builderDialRetryMax {
+			backoff = builderDialRetryMax
+		}
+	}
+}
+
+// isBuilderNotUpYet reports whether err is the kind of failure a builder pod
+// produces while it is still starting, as opposed to a real misconfiguration.
+func isBuilderNotUpYet(err error) bool {
+	if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.EHOSTUNREACH) || errors.Is(err, syscall.ENETUNREACH) ||
+		errors.Is(err, io.EOF) || errors.Is(err, os.ErrDeadlineExceeded) {
+		return true
+	}
+	// A pod whose sshd has bound but not finished starting can accept and then
+	// drop the connection before the SSH banner is exchanged.
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	return false
 }
 
 // dialSSH establishes an SSH client connection honouring ctx for the TCP dial

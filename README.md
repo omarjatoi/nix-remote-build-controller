@@ -172,13 +172,19 @@ make e2e                             # full Kind end-to-end test
 ## Architecture
 
 Each remote build slot is one SSH session to the proxy. For each session the proxy
-creates a NixBuildRequest and waits for a ready pod. The controller reconciles the
+creates a NixBuildRequest and waits for a pod IP. The controller reconciles the
 request through `Pending`, `Creating`, and `Running`, creating a dedicated builder
-pod and recording its IP. The proxy then dials the pod and splices the client's
+pod and recording its IP as soon as the pod has one. The proxy then dials the pod,
+retrying while the builder's `sshd` is still starting, and splices the client's
 session onto it, forwarding stdin, stdout, stderr, the `exec` and `env` requests,
 and the final `exit-status`. When the session ends the proxy records the outcome
 and deletes the request, whose finalizer removes the pod; a TTL reaper handles
 anything the proxy could not delete.
+
+Nothing waits on the builder pod's readiness probe: the SSH dial is itself the
+readiness check, so a session starts as soon as the builder answers rather than
+after a probe period plus a kubelet status round-trip. The probe is still set on
+the pod, but only so `kubectl get pods` reports something meaningful.
 
 Components:
 
@@ -189,7 +195,9 @@ Components:
   that renders builder pods, owns them by owner reference, and reconciles many
   requests in parallel.
 - Builder image (`flake.nix`): a minimal image running single-user Nix under
-  `sshd` as the `nixbld` user, preferring a mounted host key.
+  `sshd` as the `nixbld` user, preferring a mounted host key. Its Nix database is
+  populated at image build time, so the paths baked into the image count as valid
+  and are neither re-fetched nor rewritten at run time.
 
 ### Custom resource: NixBuildRequest
 

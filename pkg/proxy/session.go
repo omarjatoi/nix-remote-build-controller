@@ -90,8 +90,9 @@ func (p *SSHProxy) waitForBuilderPod(ctx context.Context, logger zerolog.Logger,
 	name := BuildRequestName(session.ID)
 	deadline := time.NewTimer(p.cfg.PodReadyTimeout)
 	defer deadline.Stop()
-	ticker := time.NewTicker(p.cfg.PollInterval)
-	defer ticker.Stop()
+
+	poll := time.NewTimer(0)
+	defer poll.Stop()
 
 	var lastPhase v1alpha1.BuildPhase
 	for {
@@ -100,8 +101,9 @@ func (p *SSHProxy) waitForBuilderPod(ctx context.Context, logger zerolog.Logger,
 			return "", fmt.Errorf("session cancelled while waiting for builder pod: %w", ctx.Err())
 		case <-deadline.C:
 			return "", fmt.Errorf("timed out after %s waiting for builder pod (last phase %q)", p.cfg.PodReadyTimeout, lastPhase)
-		case <-ticker.C:
+		case <-poll.C:
 		}
+		poll.Reset(p.cfg.PollInterval)
 
 		var buildReq v1alpha1.NixBuildRequest
 		if err := p.k8sClient.Get(ctx, client.ObjectKey{Namespace: p.cfg.Namespace, Name: name}, &buildReq); err != nil {

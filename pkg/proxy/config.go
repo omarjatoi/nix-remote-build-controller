@@ -59,7 +59,7 @@ const (
 	DefaultHandshakeTimeout   = 30 * time.Second
 	DefaultBuilderDialTimeout = 15 * time.Second
 	DefaultKeepaliveInterval  = 30 * time.Second
-	DefaultPollInterval       = time.Second
+	DefaultPollInterval       = 100 * time.Millisecond
 	DefaultClientCloseGrace   = 30 * time.Second
 	DefaultRemoteUser         = "nixbld"
 	DefaultRemotePort         = int32(22)
