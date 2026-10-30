@@ -421,9 +421,9 @@ async fn tunnel_session(
             if tunnel.is_cancelled() {
                 err = Some(anyhow!("session cancelled"));
             } else if exit_status.is_none() {
-                err = Some(anyhow!(
-                    "builder connection closed before the remote command finished"
-                ));
+                let lost = anyhow!("builder connection closed before the remote command finished");
+                writer.fail(&lost.to_string()).await;
+                err = Some(lost);
             }
         }
         Some(Ok(BuilderEnd::Rejected(kind))) => {
