@@ -1,0 +1,42 @@
+[package]
+name = "nix-remote-build-controller"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Kubernetes controller and SSH proxy for dynamically scaling Nix remote builders"
+license = "Apache-2.0"
+repository = "https://github.com/omarjatoi/nix-remote-build-controller"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+bytes = "1"
+clap = { version = "4.5", features = ["derive", "env"] }
+futures = "0.3"
+getrandom = "0.3"
+k8s-openapi = { version = "0.28", features = ["latest"] }
+kube = { version = "4.2", default-features = false, features = ["client", "rustls-tls", "ring", "runtime", "derive"] }
+prometheus = { version = "0.14", default-features = false }
+russh = { version = "0.65", default-features = false, features = ["ring", "rsa", "flate2"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+socket2 = "0.6"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+uuid = { version = "1", features = ["v7"] }
+
+[profile.release]
+strip = true
+lto = "thin"
+
+[dev-dependencies]
+http = "1"
+tower = { version = "0.5", features = ["util"] }
