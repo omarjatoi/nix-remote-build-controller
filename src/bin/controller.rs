@@ -100,7 +100,7 @@ struct Cli {
     #[arg(long, num_args = 0..=1, default_value_t = false, default_missing_value = "true", action = clap::ArgAction::Set)]
     leader_elect: bool,
 
-    /// Log level (trace, debug, info, warn, error)
+    /// Log level: trace, debug, info, warn, error or off
     #[arg(long, default_value = "info", value_parser = logging::parse_level)]
     log_level: LevelFilter,
 }

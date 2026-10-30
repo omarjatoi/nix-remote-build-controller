@@ -46,10 +46,15 @@ fn parse_resource_list(s: &str) -> Result<Option<BTreeMap<String, Quantity>>, St
         let value = value.trim();
         if !is_valid_quantity(value) {
             return Err(format!(
-                "{name}: quantities must match the regular expression '^([+-]?[0-9.]+)([eEinumkKMGTP]*[-+]?[0-9]*)$'"
+                "{name}: invalid quantity {value:?} (for example 500m, 2 or 4Gi)"
             ));
         }
-        list.insert(name.to_string(), Quantity(value.to_string()));
+        if list
+            .insert(name.to_string(), Quantity(value.to_string()))
+            .is_some()
+        {
+            return Err(format!("{name} is given more than once"));
+        }
     }
     Ok(Some(list))
 }
@@ -119,6 +124,7 @@ mod tests {
         assert!(parse_resources("cpu", "").is_err());
         assert!(parse_resources("=1", "").is_err());
         assert!(parse_resources("", "memory=lots").is_err());
+        assert!(parse_resources("cpu=1,cpu=2", "").is_err());
     }
 
     #[test]

@@ -870,8 +870,8 @@ pub(crate) async fn dial_builder(
 }
 
 /// One TCP + SSH handshake + authentication attempt, bounded by `timeout`.
-/// The connection is closed when `cancel` fires, or right away if
-/// the attempt fails, so an abandoned handshake cannot linger.
+/// The connection is closed when `cancel` fires, or right away if the attempt
+/// fails, so an abandoned handshake cannot linger.
 async fn dial_once(
     addr: SocketAddr,
     auth: &BuilderAuth,

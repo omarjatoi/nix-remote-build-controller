@@ -154,12 +154,12 @@ impl SshProxy {
             .await
             .context("get Kubernetes config")?;
 
-        let secret = Api::<Secret>::namespaced(client.clone(), &cfg.namespace)
+        let ssh_keys = Api::<Secret>::namespaced(client.clone(), &cfg.namespace)
             .get(ssh_key_secret)
             .await
             .with_context(|| format!("get secret {}/{ssh_key_secret}", cfg.namespace))?;
 
-        let builder_client_key = private_key_from_secret(&secret, secret::PRIVATE_KEY)?
+        let builder_client_key = private_key_from_secret(&ssh_keys, secret::PRIVATE_KEY)?
             .ok_or_else(|| {
                 anyhow!(
                     "secret {ssh_key_secret} is missing required key {:?}",
@@ -178,7 +178,7 @@ impl SshProxy {
                 info!(path = %path.display(), "Loaded SSH host key from file");
                 key
             }
-            None => match private_key_from_secret(&secret, secret::HOST_KEY)? {
+            None => match private_key_from_secret(&ssh_keys, secret::HOST_KEY)? {
                 Some(key) => {
                     info!(secret = ssh_key_secret, "Loaded SSH host key from secret");
                     key
@@ -194,7 +194,7 @@ impl SshProxy {
             },
         };
 
-        let builder_host_key = match private_key_from_secret(&secret, secret::BUILDER_HOST_KEY)? {
+        let builder_host_key = match private_key_from_secret(&ssh_keys, secret::BUILDER_HOST_KEY)? {
             Some(key) => {
                 let public = key.public_key().clone();
                 info!(fingerprint = %fingerprint(&public), "Builder host key verification enabled");
@@ -213,7 +213,7 @@ impl SshProxy {
             let auth = ClientAuthorizer::load(path)?;
             info!(path = %path.display(), keys = auth.len(), "Client public key authentication enabled");
             Some(auth)
-        } else if let Some(data) = secret::entry(&secret, secret::CLIENT_AUTHORIZED_KEYS) {
+        } else if let Some(data) = secret::entry(&ssh_keys, secret::CLIENT_AUTHORIZED_KEYS) {
             let auth = ClientAuthorizer::parse(data).with_context(|| {
                 format!(
                     "parse {:?} from secret {ssh_key_secret}",

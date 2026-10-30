@@ -53,8 +53,8 @@ struct Cli {
     #[arg(short = 'r', long, default_value_t = 22)]
     remote_port: u16,
 
-    /// Secret containing the SSH keypair used to authenticate to builder pods
-    /// (keys 'private' and 'public')
+    /// Secret with the SSH keys: 'private' (to log in to builder pods) and the
+    /// optional 'host-key', 'builder-host-key' and 'client-authorized-keys'
     #[arg(long, default_value = "nix-builder-ssh-keys")]
     ssh_key_secret: String,
 
@@ -88,7 +88,7 @@ struct Cli {
     #[arg(long, env = "PROXY_POD_UID", default_value = "")]
     owner_pod_uid: String,
 
-    /// Log level (trace, debug, info, warn, error)
+    /// Log level: trace, debug, info, warn, error or off
     #[arg(long, default_value = "info", value_parser = logging::parse_level)]
     log_level: LevelFilter,
 }

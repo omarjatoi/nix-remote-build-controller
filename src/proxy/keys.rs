@@ -57,7 +57,7 @@ mod tests {
     fn reads_keys_from_secret() {
         let key = generate_host_key().unwrap();
         let pem = key.to_openssh(LineEnding::LF).unwrap();
-        let secret = Secret {
+        let ssh_keys = Secret {
             metadata: ObjectMeta {
                 name: Some("keys".into()),
                 ..Default::default()
@@ -75,21 +75,21 @@ mod tests {
             ])),
             ..Default::default()
         };
-        let parsed = private_key_from_secret(&secret, secret::PRIVATE_KEY)
+        let parsed = private_key_from_secret(&ssh_keys, secret::PRIVATE_KEY)
             .unwrap()
             .unwrap();
         assert_eq!(parsed.public_key().key_data(), key.public_key().key_data());
         assert!(
-            private_key_from_secret(&secret, secret::HOST_KEY)
+            private_key_from_secret(&ssh_keys, secret::HOST_KEY)
                 .unwrap()
                 .is_none()
         );
         assert!(
-            private_key_from_secret(&secret, "missing")
+            private_key_from_secret(&ssh_keys, "missing")
                 .unwrap()
                 .is_none()
         );
-        let err = private_key_from_secret(&secret, secret::BUILDER_HOST_KEY).unwrap_err();
+        let err = private_key_from_secret(&ssh_keys, secret::BUILDER_HOST_KEY).unwrap_err();
         assert!(format!("{err:#}").contains("builder-host-key"));
     }
 

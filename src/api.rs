@@ -133,7 +133,8 @@ pub fn phase_str(phase: Option<BuildPhase>) -> &'static str {
     phase.map_or("", BuildPhase::as_str)
 }
 
-/// A condition of a build request.
+/// A condition of a build request. Nothing in this crate sets conditions; the
+/// field exists so that conditions written by others survive status updates.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct BuildCondition {
@@ -151,13 +152,6 @@ pub struct BuildCondition {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub message: String,
 }
-
-/// Condition type: the builder pod is ready for SSH connections.
-pub const CONDITION_POD_READY: &str = "PodReady";
-/// Condition type: the build has completed.
-pub const CONDITION_COMPLETED: &str = "Completed";
-/// Condition type: the build has failed.
-pub const CONDITION_FAILED: &str = "Failed";
 
 /// The current time as a Kubernetes timestamp.
 pub fn now() -> Time {
@@ -246,7 +240,7 @@ mod tests {
         );
         orig.status = Some(NixBuildRequestStatus {
             conditions: vec![BuildCondition {
-                type_: CONDITION_POD_READY.into(),
+                type_: "PodReady".into(),
                 status: "True".into(),
                 last_transition_time: now(),
                 reason: String::new(),
