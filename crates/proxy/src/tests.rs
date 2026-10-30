@@ -1564,6 +1564,41 @@ async fn dial_builder_does_not_retry_rejected_client_key() {
     assert!(start.elapsed() < Duration::from_secs(3));
 }
 
+// The timeout covers all attempts together: an attempt that starts just
+// before the deadline must not get a whole timeout of its own.
+#[tokio::test]
+async fn dial_builder_keeps_to_its_timeout_across_attempts() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let start = Instant::now();
+    // Drops connections for 900ms (a pod still starting), then accepts them
+    // and never answers (a hung sshd).
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((stream, _)) = listener.accept().await {
+            if start.elapsed() >= Duration::from_millis(900) {
+                held.push(stream);
+            }
+        }
+    });
+    let auth = builder_auth(&key(), None);
+    let err = dial_builder(
+        addr,
+        &auth,
+        Duration::from_secs(1),
+        &CancellationToken::new(),
+    )
+    .await
+    .err()
+    .expect("a hung builder cannot be dialled");
+    // Giving the last attempt a full timeout would take about 1.9s.
+    assert!(
+        start.elapsed() < Duration::from_millis(1500),
+        "gave up after {:?}: {err}",
+        start.elapsed()
+    );
+}
+
 #[tokio::test]
 async fn dial_builder_stops_when_cancelled() {
     let addr = reserve_addr().await;

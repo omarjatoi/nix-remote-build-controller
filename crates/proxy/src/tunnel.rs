@@ -860,7 +860,8 @@ pub(crate) async fn dial_builder(
     let mut attempts: u32 = 0;
     loop {
         attempts += 1;
-        let err = match dial_once(addr, auth, timeout, cancel).await {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let err = match dial_once(addr, auth, remaining, cancel).await {
             Ok(handle) => {
                 if attempts > 1 {
                     debug!(attempts, addr = %addr, "Builder accepted connection after retrying");
