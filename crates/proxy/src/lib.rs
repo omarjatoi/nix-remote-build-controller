@@ -18,8 +18,8 @@ pub use auth::{ClientAuthorizer, fingerprint};
 pub use config::*;
 pub use server::SshProxy;
 pub use session::{
-    ANNOTATION_PROXY_POD, BuildRequestClient, KubeBuildRequestClient, LABEL_MANAGED_BY,
-    MANAGED_BY_VALUE, Session, SessionResult, build_request_name,
+    ANNOTATION_PROXY_POD, LABEL_MANAGED_BY, MANAGED_BY_VALUE, Session, SessionResult,
+    build_request_name,
 };
 
 #[cfg(test)]

@@ -18,7 +18,7 @@
         pkgs = nixpkgs.legacyPackages.${system};
         lib = pkgs.lib;
         cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
-        version = cargoToml.package.version;
+        version = cargoToml.workspace.package.version;
 
         # Only the Rust sources affect the build; manifests and docs do not.
         rustSrc = lib.fileset.toSource {
@@ -26,11 +26,13 @@
           fileset = lib.fileset.unions [
             ./Cargo.toml
             ./Cargo.lock
-            ./src
+            ./clippy.toml
+            ./crates
           ];
         };
 
-        # Build one of the crate's binaries (`controller` or `proxy`).
+        # Build one of the workspace's programs (`controller` or `proxy`). Each
+        # is its own package, so only that program's dependencies are built.
         buildRustApp =
           name:
           pkgs.rustPlatform.buildRustPackage {
@@ -39,7 +41,7 @@
             src = rustSrc;
             cargoLock.lockFile = ./Cargo.lock;
             cargoBuildFlags = [
-              "--bin"
+              "--package"
               name
             ];
             # The test suite runs once, in `checks`, rather than per binary.

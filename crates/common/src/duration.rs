@@ -10,6 +10,7 @@ use std::time::Duration;
 const MAX_FRACTION_DIGITS: usize = 19;
 
 /// Error returned for a malformed duration string.
+#[must_use]
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("invalid duration {0:?}")]
 pub struct ParseDurationError(String);

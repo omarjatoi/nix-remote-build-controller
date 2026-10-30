@@ -21,15 +21,16 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use tracing::{Instrument, debug, error, error_span, info, warn};
 
-use super::auth::{ClientAuthorizer, fingerprint};
-use super::config::Config;
-use super::keys::{generate_host_key, load_private_key, private_key_from_secret};
-use super::session::{BuildRequestClient, KubeBuildRequestClient, Session, SessionResult};
-use super::stream::CancellableStream;
-use super::tunnel::{BuilderAuth, ClientSide};
-use crate::duration::format as fmt_duration;
-use crate::http::HttpServer;
-use crate::{lock, secret};
+use api::{BuildRequestClient, KubeBuildRequestClient, secret};
+use common::duration;
+use common::http::HttpServer;
+
+use crate::auth::{ClientAuthorizer, fingerprint};
+use crate::config::Config;
+use crate::keys::{generate_host_key, load_private_key, private_key_from_secret};
+use crate::session::{Session, SessionResult};
+use crate::stream::CancellableStream;
+use crate::tunnel::{BuilderAuth, ClientSide};
 
 /// How long to wait for sessions after they were force-cancelled at the end of
 /// the drain window.
@@ -103,7 +104,7 @@ impl SshProxy {
             ..Default::default()
         };
 
-        let listener = crate::http::bind(&cfg.listen_addr).await?;
+        let listener = common::http::bind(&cfg.listen_addr).await?;
         let local_addr = listener.local_addr()?;
         let draining = CancellationToken::new();
         let health = if cfg.health_addr.is_empty() {
@@ -117,8 +118,8 @@ impl SshProxy {
             client_auth = client_auth.is_some(),
             builder_host_key_verification = builder_host_key.is_some(),
             max_sessions = cfg.max_sessions,
-            pod_ready_timeout = %fmt_duration(cfg.pod_ready_timeout),
-            shutdown_timeout = %fmt_duration(cfg.shutdown_timeout),
+            pod_ready_timeout = %duration::format(cfg.pod_ready_timeout),
+            shutdown_timeout = %duration::format(cfg.shutdown_timeout),
             "SSH proxy listening"
         );
 
@@ -154,7 +155,8 @@ impl SshProxy {
             .await
             .context("get Kubernetes config")?;
 
-        let ssh_keys = Api::<Secret>::namespaced(client.clone(), &cfg.namespace)
+        let secrets: Api<Secret> = Api::namespaced(client.clone(), &cfg.namespace);
+        let ssh_keys = secrets
             .get(ssh_key_secret)
             .await
             .with_context(|| format!("get secret {}/{ssh_key_secret}", cfg.namespace))?;
@@ -262,14 +264,17 @@ impl SshProxy {
 
     /// The number of build sessions currently in flight.
     pub fn session_count(&self) -> usize {
-        lock(&self.sessions).len()
+        self.sessions.lock().expect("mutex poisoned").len()
     }
 
     /// Serves connections until `shutdown` is cancelled, then drains in-flight
     /// connections for up to the configured shutdown timeout. Returns `Ok`
     /// after a clean shutdown and an error if the listener failed.
     pub async fn run(self: &Arc<Self>, shutdown: CancellationToken) -> anyhow::Result<()> {
-        let listener = lock(&self.listener)
+        let listener = self
+            .listener
+            .lock()
+            .expect("mutex poisoned")
             .take()
             .context("SSH proxy is already running")?;
 
@@ -324,7 +329,7 @@ impl SshProxy {
     async fn drain(&self, connections: &TaskTracker, force: &CancellationToken) {
         info!(
             active_sessions = self.session_count(),
-            timeout = %fmt_duration(self.cfg.shutdown_timeout),
+            timeout = %duration::format(self.cfg.shutdown_timeout),
             "Not accepting new connections, draining active sessions"
         );
         connections.close();
@@ -473,7 +478,7 @@ impl SshProxy {
     /// concurrent-session count, so `max_sessions` is a hard cap even when many
     /// channels open at once. `None` when the cap is reached.
     fn track_session(&self, id: &str) -> Option<SessionGuard> {
-        let mut sessions = lock(&self.sessions);
+        let mut sessions = self.sessions.lock().expect("mutex poisoned");
         if self.cfg.max_sessions > 0 && sessions.len() >= self.cfg.max_sessions {
             return None;
         }
@@ -507,7 +512,7 @@ impl SshProxy {
 
         info!(
             succeeded = result.err.is_none(),
-            duration = %fmt_duration(session.start.elapsed()),
+            duration = %duration::format(session.start.elapsed()),
             "Build session closed"
         );
     }
@@ -564,7 +569,10 @@ struct SessionGuard {
 
 impl Drop for SessionGuard {
     fn drop(&mut self) {
-        lock(&self.sessions).remove(&self.id);
+        self.sessions
+            .lock()
+            .expect("mutex poisoned")
+            .remove(&self.id);
     }
 }
 
@@ -782,7 +790,7 @@ async fn start_health_server(
     addr: &str,
     draining: CancellationToken,
 ) -> anyhow::Result<HttpServer> {
-    let listener = crate::http::bind(addr)
+    let listener = common::http::bind(addr)
         .await
         .context("listen health server")?;
     let router = axum::Router::new()

@@ -12,10 +12,10 @@ use async_trait::async_trait;
 use k8s_openapi::api::core::v1::{Pod, PodStatus};
 use kube::ResourceExt;
 
-use crate::api::{self, NixBuildRequest, NixBuildRequestStatus};
-use crate::controller::{BuildEvent, ControllerClient};
-use crate::kube_util::api_error;
-use crate::proxy::BuildRequestClient;
+use crate::{
+    BuildEvent, BuildRequestClient, ControllerClient, NixBuildRequest, NixBuildRequestStatus,
+    kube_error,
+};
 
 type Key = (String, String);
 
@@ -49,22 +49,24 @@ fn key(namespace: &str, name: &str) -> Key {
 }
 
 fn not_found(kind: &str, name: &str) -> kube::Error {
-    api_error(404, "NotFound", format!("{kind} \"{name}\" not found"))
+    kube_error::new(404, "NotFound", &format!("{kind} \"{name}\" not found"))
 }
 
 fn conflict(kind: &str, name: &str) -> kube::Error {
-    api_error(
+    kube_error::new(
         409,
         "Conflict",
-        format!("Operation cannot be fulfilled on {kind} \"{name}\": the object has been modified"),
+        &format!(
+            "Operation cannot be fulfilled on {kind} \"{name}\": the object has been modified"
+        ),
     )
 }
 
 fn already_exists(kind: &str, name: &str) -> kube::Error {
-    api_error(
+    kube_error::new(
         409,
         "AlreadyExists",
-        format!("{kind} \"{name}\" already exists"),
+        &format!("{kind} \"{name}\" already exists"),
     )
 }
 
@@ -89,12 +91,13 @@ fn merge_patch(target: &mut serde_json::Value, patch: &serde_json::Value) {
 }
 
 impl FakeKube {
+    /// An empty API.
     pub fn new() -> Self {
         Self::default()
     }
 
     fn state(&self) -> MutexGuard<'_, State> {
-        crate::lock(&self.state)
+        self.state.lock().expect("fake API state poisoned")
     }
 
     /// Stores a request as-is (status included), like seeding a fake client.
@@ -120,10 +123,12 @@ impl FakeKube {
         );
     }
 
+    /// Reads a request.
     pub fn request(&self, namespace: &str, name: &str) -> Option<NixBuildRequest> {
         self.state().requests.get(&key(namespace, name)).cloned()
     }
 
+    /// All requests in a namespace.
     pub fn requests(&self, namespace: &str) -> Vec<NixBuildRequest> {
         self.state()
             .requests
@@ -133,6 +138,7 @@ impl FakeKube {
             .collect()
     }
 
+    /// Reads a pod.
     pub fn pod(&self, namespace: &str, name: &str) -> Option<Pod> {
         self.state().pods.get(&key(namespace, name)).cloned()
     }
@@ -178,6 +184,7 @@ impl FakeKube {
         self.state().failing_request_deletes = count;
     }
 
+    /// Events published so far, oldest first.
     pub fn events(&self) -> Vec<BuildEvent> {
         self.state().events.clone()
     }
@@ -187,7 +194,11 @@ impl FakeKube {
         let mut state = self.state();
         if state.failing_request_deletes > 0 {
             state.failing_request_deletes -= 1;
-            return Err(api_error(503, "ServiceUnavailable", "the server is busy"));
+            return Err(kube_error::new(
+                503,
+                "ServiceUnavailable",
+                "the server is busy",
+            ));
         }
         let k = key(namespace, name);
         let version = state.bump();
@@ -198,7 +209,7 @@ impl FakeKube {
         if stored.finalizers().is_empty() {
             state.requests.remove(&k);
         } else if stored.metadata.deletion_timestamp.is_none() {
-            stored.metadata.deletion_timestamp = Some(api::now());
+            stored.metadata.deletion_timestamp = Some(crate::now());
             stored.metadata.resource_version = Some(version);
         }
         Ok(())
@@ -274,7 +285,7 @@ impl ControllerClient for FakeKube {
     async fn create_pod(&self, pod: &Pod) -> kube::Result<Pod> {
         let mut state = self.state();
         if let Some((code, reason, message)) = state.fail_next_pod_create.take() {
-            return Err(api_error(code, &reason, message));
+            return Err(kube_error::new(code, &reason, &message));
         }
         let k = key(&pod.namespace().unwrap_or_default(), &pod.name_any());
         if state.pods.contains_key(&k) {
@@ -319,7 +330,7 @@ impl BuildRequestClient for FakeKube {
         let mut created = req.clone();
         created.metadata.resource_version = Some(state.bump());
         created.metadata.uid = Some(format!("uid-{}", req.name_any()));
-        created.metadata.creation_timestamp = Some(api::now());
+        created.metadata.creation_timestamp = Some(crate::now());
         // The status subresource is not writable on create.
         created.status = None;
         state.requests.insert(k, created);
@@ -349,7 +360,8 @@ impl BuildRequestClient for FakeKube {
             merge_patch(&mut status, status_patch);
         }
         stored.status = Some(
-            serde_json::from_value(status).map_err(|e| api_error(422, "Invalid", e.to_string()))?,
+            serde_json::from_value(status)
+                .map_err(|e| kube_error::new(422, "Invalid", &e.to_string()))?,
         );
         stored.metadata.resource_version = Some(version);
         Ok(())

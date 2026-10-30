@@ -9,16 +9,18 @@ use clap::{Parser, Subcommand};
 use k8s_openapi::api::core::v1::Secret;
 use kube::runtime::events::Reporter;
 use kube::{Api, Client};
-use nix_remote_build_controller::controller::leader::{LeaderElectionConfig, LeaderElector};
-use nix_remote_build_controller::controller::{
-    self, KubeControllerClient, Metrics, Reconciler, ReconcilerConfig, Runner,
-};
-use nix_remote_build_controller::duration::{self, clap_parser as parse_duration};
-use nix_remote_build_controller::http::{self, HttpServer};
-use nix_remote_build_controller::{VERSION, error_chain, logging, secret, shutdown_token};
 use tokio_util::sync::CancellationToken;
 use tracing::level_filters::LevelFilter;
 use tracing::{info, warn};
+
+use api::{KubeControllerClient, secret};
+use common::http::{self, HttpServer};
+use common::{duration, error, logging, shutdown};
+use controller::leader::{LeaderElectionConfig, LeaderElector};
+use controller::{Metrics, Reconciler, ReconcilerConfig, Runner};
+
+/// The version reported by `controller version`.
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const LEADER_ELECTION_ID: &str = "nix-remote-build-controller.nix.io";
 const REPORTER_NAME: &str = "nix-remote-build-controller";
@@ -84,12 +86,12 @@ struct Cli {
     metrics_addr: String,
 
     /// How long to wait for in-flight reconciles on shutdown
-    #[arg(long, default_value = "30s", value_parser = parse_duration)]
+    #[arg(long, default_value = "30s", value_parser = duration::clap_parser)]
     shutdown_timeout: Duration,
 
     /// How long Completed/Failed NixBuildRequests are kept before the
     /// controller deletes them
-    #[arg(long, default_value = "10m", value_parser = parse_duration)]
+    #[arg(long, default_value = "10m", value_parser = duration::clap_parser)]
     completed_ttl: Duration,
 
     /// Number of NixBuildRequests reconciled concurrently
@@ -121,7 +123,7 @@ async fn main() -> ExitCode {
     match run(cli).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            eprintln!("{}", error_chain(&err));
+            eprintln!("{}", error::chain(&err));
             ExitCode::FAILURE
         }
     }
@@ -144,7 +146,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     };
     let namespace = non_empty(&cli.namespace).unwrap_or_else(|| "default".to_string());
 
-    let shutdown = shutdown_token();
+    let shutdown = shutdown::token();
     let client = Client::try_default()
         .await
         .context("get Kubernetes config")?;
@@ -211,7 +213,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         shutdown_timeout: cli.shutdown_timeout,
     };
     let result = if cli.leader_elect {
-        let election = LeaderElectionConfig::new(&namespace, LEADER_ELECTION_ID, identity);
+        let election = LeaderElectionConfig::new(&namespace, LEADER_ELECTION_ID, &identity);
         run_as_leader(runner, LeaderElector::new(client, election), &shutdown).await
     } else {
         runner.run(shutdown).await;
@@ -265,7 +267,8 @@ async fn secret_has_builder_host_key(
     namespace: &str,
     name: &str,
 ) -> anyhow::Result<bool> {
-    let ssh_keys = Api::<Secret>::namespaced(client.clone(), namespace)
+    let secrets: Api<Secret> = Api::namespaced(client.clone(), namespace);
+    let ssh_keys = secrets
         .get(name)
         .await
         .with_context(|| format!("read SSH key secret {namespace}/{name}"))?;

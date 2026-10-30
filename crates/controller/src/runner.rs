@@ -8,6 +8,7 @@ use axum::http::header::CONTENT_TYPE;
 use futures::StreamExt;
 use k8s_openapi::api::core::v1::Pod;
 use kube::runtime::controller::{self, Action, Controller};
+use kube::runtime::reflector::ObjectRef;
 use kube::runtime::watcher;
 use kube::{Api, Client, ResourceExt};
 use prometheus::{
@@ -17,11 +18,10 @@ use prometheus::{
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-use super::{
-    KubeControllerClient, LABEL_APP, LABEL_APP_VALUE, ReconcileAction, ReconcileError, Reconciler,
-};
-use crate::api::NixBuildRequest;
-use crate::lock;
+use api::{KubeControllerClient, NixBuildRequest};
+use common::duration;
+
+use crate::{LABEL_APP, LABEL_APP_VALUE, ReconcileAction, ReconcileError, Reconciler};
 
 /// Per-object retry backoff after a failed reconcile: 5ms doubling up to 1000s,
 /// reset on success.
@@ -129,19 +129,15 @@ impl Default for Metrics {
 struct Context {
     reconciler: Reconciler<KubeControllerClient>,
     metrics: Arc<Metrics>,
-    /// Consecutive failures per (namespace, name), for error backoff.
-    failures: Mutex<HashMap<(String, String), u32>>,
-}
-
-fn object_key(obj: &NixBuildRequest) -> (String, String) {
-    (obj.namespace().unwrap_or_default(), obj.name_any())
+    /// Consecutive failures per object, for error backoff.
+    failures: Mutex<HashMap<ObjectRef<NixBuildRequest>, u32>>,
 }
 
 /// Counts a reconcile in the active-workers gauge for as long as it lives.
-struct ActiveWorker<'a>(&'a IntGauge);
+struct ActiveWorker<'gauge>(&'gauge IntGauge);
 
-impl<'a> ActiveWorker<'a> {
-    fn start(gauge: &'a IntGauge) -> Self {
+impl<'gauge> ActiveWorker<'gauge> {
+    fn start(gauge: &'gauge IntGauge) -> Self {
         gauge.inc();
         Self(gauge)
     }
@@ -179,7 +175,10 @@ async fn reconcile(obj: Arc<NixBuildRequest>, ctx: Arc<Context>) -> Result<Actio
     metrics.reconcile_total.with_label_values(&[outcome]).inc();
     match result {
         Ok(action) => {
-            lock(&ctx.failures).remove(&object_key(&obj));
+            ctx.failures
+                .lock()
+                .expect("mutex poisoned")
+                .remove(&ObjectRef::from_obj(&*obj));
             Ok(action.into())
         }
         Err(err) => {
@@ -190,15 +189,15 @@ async fn reconcile(obj: Arc<NixBuildRequest>, ctx: Arc<Context>) -> Result<Actio
 }
 
 fn error_policy(obj: Arc<NixBuildRequest>, err: &ReconcileError, ctx: Arc<Context>) -> Action {
-    let mut failures = lock(&ctx.failures);
-    let count = failures.entry(object_key(&obj)).or_insert(0);
+    let mut failures = ctx.failures.lock().expect("mutex poisoned");
+    let count = failures.entry(ObjectRef::from_obj(&*obj)).or_insert(0);
     let delay = backoff(*count);
     *count = count.saturating_add(1);
     error!(
         build_request = %obj.name_any(),
         namespace = %obj.namespace().unwrap_or_default(),
         error = %err,
-        retry_in = %crate::duration::format(delay),
+        retry_in = %duration::format(delay),
         "Reconciler error"
     );
     Action::requeue(delay)
@@ -213,10 +212,13 @@ fn backoff(failures: u32) -> Duration {
 
 /// Everything the controller loop needs.
 pub struct Runner {
+    /// Client for the watches.
     pub client: Client,
+    /// Reconciles each `NixBuildRequest`.
     pub reconciler: Reconciler<KubeControllerClient>,
     /// Number of requests reconciled concurrently.
     pub workers: u16,
+    /// Where reconcile metrics are recorded.
     pub metrics: Arc<Metrics>,
     /// How long in-flight reconciles may run after shutdown is requested.
     pub shutdown_timeout: Duration,
@@ -248,13 +250,14 @@ impl Runner {
         let pod_selector = format!("{LABEL_APP}={LABEL_APP_VALUE}");
 
         let stop = shutdown.clone();
-        let failures = Arc::clone(&ctx);
-        let controller = Controller::new(requests, watcher::Config::default())
+        let mut results = Controller::new(requests, watcher::Config::default())
             .owns(pods, watcher::Config::default().labels(&pod_selector))
             .with_config(controller::Config::default().concurrency(workers))
             .graceful_shutdown_on(async move { stop.cancelled().await })
-            .run(reconcile, error_policy, ctx)
-            .for_each(move |result| {
+            .run(reconcile, error_policy, Arc::clone(&ctx))
+            .boxed();
+        let controller = async {
+            while let Some(result) = results.next().await {
                 match result {
                     Ok(_) => {}
                     // Logged and retried by error_policy.
@@ -262,13 +265,14 @@ impl Runner {
                     Err(controller::Error::ObjectNotFound(obj)) => {
                         debug!(object = %obj, "Object vanished before it could be reconciled");
                         // Forget its retry backoff.
-                        let key = (obj.namespace.clone().unwrap_or_default(), obj.name.clone());
-                        lock(&failures.failures).remove(&key);
+                        let mut key: ObjectRef<NixBuildRequest> = ObjectRef::new(&obj.name);
+                        key.namespace.clone_from(&obj.namespace);
+                        ctx.failures.lock().expect("mutex poisoned").remove(&key);
                     }
                     Err(err) => warn!(error = %err, "Controller watch error"),
                 }
-                std::future::ready(())
-            });
+            }
+        };
 
         let drain_deadline = async {
             shutdown.cancelled().await;
@@ -277,7 +281,7 @@ impl Runner {
         tokio::select! {
             () = controller => info!("Controller stopped"),
             () = drain_deadline => warn!(
-                timeout = %crate::duration::format(shutdown_timeout),
+                timeout = %duration::format(shutdown_timeout),
                 "Timed out waiting for in-flight reconciles"
             ),
         }

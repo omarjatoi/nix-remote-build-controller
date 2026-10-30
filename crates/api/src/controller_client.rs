@@ -4,13 +4,25 @@
 use async_trait::async_trait;
 use k8s_openapi::api::core::v1::Pod;
 use kube::api::{DeleteParams, PostParams};
-use kube::runtime::events::{Event, Recorder, Reporter};
+use kube::runtime::events::{Event, EventType, Recorder, Reporter};
 use kube::{Api, Client, Resource, ResourceExt};
 use tracing::debug;
 
-use super::BuildEvent;
-use crate::api::NixBuildRequest;
-use crate::kube_util::is_not_found;
+use crate::NixBuildRequest;
+use crate::kube_error;
+
+/// An event recorded on a `NixBuildRequest` (events.k8s.io/v1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildEvent {
+    /// Normal or Warning.
+    pub type_: EventType,
+    /// Machine-readable cause, e.g. `PodCreated`.
+    pub reason: &'static str,
+    /// The operation being performed, e.g. `CreatePod`.
+    pub action: &'static str,
+    /// Human-readable description.
+    pub note: String,
+}
 
 /// Kubernetes operations used by the reconciler.
 #[async_trait]
@@ -90,7 +102,7 @@ impl ControllerClient for KubeControllerClient {
     async fn get_pod(&self, namespace: &str, name: &str) -> kube::Result<Option<Pod>> {
         match self.pods(namespace).get(name).await {
             Ok(pod) => Ok(Some(pod)),
-            Err(err) if is_not_found(&err) => Ok(None),
+            Err(err) if kube_error::is_not_found(&err) => Ok(None),
             Err(err) => Err(err),
         }
     }

@@ -5,17 +5,16 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, anyhow, bail};
-use async_trait::async_trait;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
-use kube::api::{DeleteParams, Patch, PatchParams, PostParams};
-use kube::{Api, Client};
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-use super::SshProxy;
-use crate::api::{self, BuildPhase, NixBuildRequest, NixBuildRequestSpec};
-use crate::kube_util::is_not_found;
+use api::kube_error;
+use api::{BuildPhase, NixBuildRequest, NixBuildRequestSpec};
+use common::duration;
+
+use crate::SshProxy;
 
 /// Standard managed-by label.
 pub const LABEL_MANAGED_BY: &str = "app.kubernetes.io/managed-by";
@@ -31,80 +30,13 @@ const FINALIZE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Pause between attempts to delete a request.
 const DELETE_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
-/// The API operations the proxy performs on `NixBuildRequest`s.
-#[async_trait]
-pub trait BuildRequestClient: Send + Sync + 'static {
-    /// Creates a request.
-    async fn create(&self, req: &NixBuildRequest) -> kube::Result<()>;
-    /// Reads a request.
-    async fn get(&self, namespace: &str, name: &str) -> kube::Result<NixBuildRequest>;
-    /// Applies a JSON merge patch to a request's status subresource.
-    async fn patch_status(
-        &self,
-        namespace: &str,
-        name: &str,
-        patch: &serde_json::Value,
-    ) -> kube::Result<()>;
-    /// Deletes a request.
-    async fn delete(&self, namespace: &str, name: &str) -> kube::Result<()>;
-}
-
-/// [`BuildRequestClient`] backed by the Kubernetes API.
-#[derive(Clone)]
-pub struct KubeBuildRequestClient {
-    client: Client,
-}
-
-impl KubeBuildRequestClient {
-    /// Wraps a Kubernetes client.
-    pub fn new(client: Client) -> Self {
-        Self { client }
-    }
-
-    fn api(&self, namespace: &str) -> Api<NixBuildRequest> {
-        Api::namespaced(self.client.clone(), namespace)
-    }
-}
-
-#[async_trait]
-impl BuildRequestClient for KubeBuildRequestClient {
-    async fn create(&self, req: &NixBuildRequest) -> kube::Result<()> {
-        let namespace = req.metadata.namespace.clone().unwrap_or_default();
-        self.api(&namespace)
-            .create(&PostParams::default(), req)
-            .await
-            .map(|_| ())
-    }
-
-    async fn get(&self, namespace: &str, name: &str) -> kube::Result<NixBuildRequest> {
-        self.api(namespace).get(name).await
-    }
-
-    async fn patch_status(
-        &self,
-        namespace: &str,
-        name: &str,
-        patch: &serde_json::Value,
-    ) -> kube::Result<()> {
-        self.api(namespace)
-            .patch_status(name, &PatchParams::default(), &Patch::Merge(patch))
-            .await
-            .map(|_| ())
-    }
-
-    async fn delete(&self, namespace: &str, name: &str) -> kube::Result<()> {
-        self.api(namespace)
-            .delete(name, &DeleteParams::default())
-            .await
-            .map(|_| ())
-    }
-}
-
 /// One build session: one SSH session channel, one `NixBuildRequest`, one
 /// builder pod.
 #[derive(Debug)]
 pub struct Session {
+    /// Unique ID, also used in the `NixBuildRequest` name and labels.
     pub id: String,
+    /// When the session started.
     pub start: Instant,
     /// True once the `NixBuildRequest` exists and must be cleaned up.
     pub created: bool,
@@ -239,7 +171,7 @@ impl SshProxy {
                             _ => {}
                         }
                     }
-                    Err(err) if is_not_found(&err) => {
+                    Err(err) if kube_error::is_not_found(&err) => {
                         bail!("NixBuildRequest disappeared while waiting for builder pod")
                     }
                     // Transient API errors: keep polling until the deadline.
@@ -258,7 +190,7 @@ impl SshProxy {
             Some(Ok(result)) => result,
             Some(Err(_elapsed)) => Err(anyhow!(
                 "timed out after {} waiting for builder pod (last phase {:?})",
-                crate::duration::format(timeout),
+                duration::format(timeout),
                 api::phase_str(last_phase)
             )),
             None => Err(anyhow!("session cancelled while waiting for builder pod")),
@@ -298,7 +230,7 @@ impl SshProxy {
                     }
                 });
                 if let Err(err) = self.kube.patch_status(namespace, &name, &patch).await
-                    && !is_not_found(&err)
+                    && !kube_error::is_not_found(&err)
                 {
                     warn!(error = %err, "Failed to record final NixBuildRequest status");
                 }
@@ -307,7 +239,7 @@ impl SshProxy {
             // its builder pod until the build timeout ends it.
             loop {
                 match self.kube.delete(namespace, &name).await {
-                    Err(err) if !is_not_found(&err) => {
+                    Err(err) if !kube_error::is_not_found(&err) => {
                         warn!(error = %err, "Failed to delete NixBuildRequest, retrying");
                         tokio::time::sleep(DELETE_RETRY_INTERVAL).await;
                     }

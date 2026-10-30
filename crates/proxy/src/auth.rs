@@ -107,7 +107,7 @@ pub fn fingerprint(key: &PublicKey) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proxy::keys::generate_host_key;
+    use crate::keys::generate_host_key;
 
     #[test]
     fn parses_and_matches_keys() {

@@ -14,8 +14,8 @@ use kube::{Api, Client};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use crate::kube_util::{is_already_exists, is_conflict, is_not_found};
-use crate::lock;
+use api::kube_error;
+use common::duration;
 
 /// Leader election timings and identity.
 #[derive(Debug, Clone)]
@@ -37,15 +37,11 @@ pub struct LeaderElectionConfig {
 
 impl LeaderElectionConfig {
     /// Defaults: 15s lease, 10s renew deadline, 2s retry.
-    pub fn new(
-        namespace: impl Into<String>,
-        name: impl Into<String>,
-        identity: impl Into<String>,
-    ) -> Self {
+    pub fn new(namespace: &str, name: &str, identity: &str) -> Self {
         Self {
-            namespace: namespace.into(),
-            name: name.into(),
-            identity: identity.into(),
+            namespace: namespace.to_string(),
+            name: name.to_string(),
+            identity: identity.to_string(),
             lease_duration: Duration::from_secs(15),
             renew_deadline: Duration::from_secs(10),
             retry_period: Duration::from_secs(2),
@@ -54,6 +50,7 @@ impl LeaderElectionConfig {
 }
 
 /// Leadership was lost while it was held.
+#[must_use]
 #[derive(Debug, thiserror::Error)]
 #[error("leader election lost: {0}")]
 pub struct LeadershipLost(String);
@@ -135,7 +132,7 @@ impl LeaderElector {
             if last_renewed.elapsed() > self.cfg.renew_deadline {
                 return LeadershipLost(format!(
                     "lease not renewed within {}",
-                    crate::duration::format(self.cfg.renew_deadline)
+                    duration::format(self.cfg.renew_deadline)
                 ));
             }
         }
@@ -180,7 +177,7 @@ impl LeaderElector {
             .max(1);
         let existing = match self.api.get(&self.cfg.name).await {
             Ok(lease) => lease,
-            Err(err) if is_not_found(&err) => {
+            Err(err) if kube_error::is_not_found(&err) => {
                 let lease = Lease {
                     metadata: ObjectMeta {
                         name: Some(self.cfg.name.clone()),
@@ -201,7 +198,9 @@ impl LeaderElector {
                         self.observe(created.spec);
                         Ok(Attempt::Held)
                     }
-                    Err(err) if is_already_exists(&err) || is_conflict(&err) => {
+                    Err(err)
+                        if kube_error::is_already_exists(&err) || kube_error::is_conflict(&err) =>
+                    {
                         Ok(Attempt::Conflict)
                     }
                     Err(err) => Err(err),
@@ -243,7 +242,7 @@ impl LeaderElector {
                 self.observe(replaced.spec);
                 Ok(Attempt::Held)
             }
-            Err(err) if is_conflict(&err) => Ok(Attempt::Conflict),
+            Err(err) if kube_error::is_conflict(&err) => Ok(Attempt::Conflict),
             Err(err) => Err(err),
         }
     }
@@ -251,7 +250,7 @@ impl LeaderElector {
     /// Records the lease record and returns when it was first seen in this
     /// exact state.
     fn observe(&self, spec: Option<LeaseSpec>) -> Instant {
-        let mut observed = lock(&self.observed);
+        let mut observed = self.observed.lock().expect("mutex poisoned");
         match observed.as_ref() {
             Some(o) if o.spec == spec => o.at,
             _ => {

@@ -6,11 +6,14 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use clap::{Parser, Subcommand};
-use nix_remote_build_controller::duration::clap_parser as parse_duration;
-use nix_remote_build_controller::proxy::{self, SshProxy};
-use nix_remote_build_controller::{VERSION, error_chain, logging, shutdown_token};
 use tracing::info;
 use tracing::level_filters::LevelFilter;
+
+use common::{duration, error, logging, shutdown};
+use proxy::SshProxy;
+
+/// The version reported by `proxy version`.
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// SSH proxy for Nix remote builders.
 ///
@@ -59,21 +62,21 @@ struct Cli {
     ssh_key_secret: String,
 
     /// How long a session waits for its builder pod to become ready
-    #[arg(long, default_value = "5m", value_parser = parse_duration)]
+    #[arg(long, default_value = "5m", value_parser = duration::clap_parser)]
     pod_ready_timeout: Duration,
 
     /// Maximum lifetime of a builder pod (NixBuildRequest.spec.timeoutSeconds);
     /// 0 uses the CRD default
-    #[arg(long, default_value = "1h", value_parser = parse_duration)]
+    #[arg(long, default_value = "1h", value_parser = duration::clap_parser)]
     build_timeout: Duration,
 
     /// How long in-flight build sessions may continue after SIGTERM before
     /// being closed
-    #[arg(long, default_value = "30m", value_parser = parse_duration)]
+    #[arg(long, default_value = "30m", value_parser = duration::clap_parser)]
     shutdown_timeout: Duration,
 
     /// Keepalive interval for client and builder connections (0 disables)
-    #[arg(long, default_value = "30s", value_parser = parse_duration)]
+    #[arg(long, default_value = "30s", value_parser = duration::clap_parser)]
     keepalive_interval: Duration,
 
     /// Maximum number of concurrent build sessions (0 = unlimited)
@@ -109,7 +112,7 @@ async fn main() -> ExitCode {
     match run(cli).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            eprintln!("{}", error_chain(&err));
+            eprintln!("{}", error::chain(&err));
             ExitCode::FAILURE
         }
     }
@@ -140,7 +143,7 @@ fn optional_path(s: &str) -> Option<PathBuf> {
 async fn run(cli: Cli) -> anyhow::Result<()> {
     logging::init(cli.log_level);
 
-    let shutdown = shutdown_token();
+    let shutdown = shutdown::token();
     let host_key = optional_path(&cli.host_key);
     let client_keys = optional_path(&cli.client_authorized_keys);
     let ssh_proxy = SshProxy::from_cluster(

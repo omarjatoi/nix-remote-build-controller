@@ -19,12 +19,12 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use super::SshProxy;
-use super::config::Config;
-use super::session::SessionResult;
-use super::stream::CancellableStream;
-use crate::duration::format as fmt_duration;
-use crate::lock;
+use common::duration;
+
+use crate::SshProxy;
+use crate::config::Config;
+use crate::session::SessionResult;
+use crate::stream::CancellableStream;
 
 /// Client input held while the builder pod starts. Beyond these limits the
 /// proxy stops reading the client channel and russh's flow control applies.
@@ -260,7 +260,7 @@ impl Shared {
         if self.tunnel.is_cancelled() {
             return;
         }
-        let mut slot = lock(&self.copy_err);
+        let mut slot = self.copy_err.lock().expect("mutex poisoned");
         if slot.is_none() {
             *slot = Some(anyhow!("{direction}: {err}"));
         }
@@ -279,7 +279,8 @@ impl Shared {
             if buffered < INPUT_SOFT_LIMIT {
                 return true;
             }
-            let stalled_at = *lock(&self.last_progress) + self.stall_timeout;
+            let stalled_at =
+                *self.last_progress.lock().expect("mutex poisoned") + self.stall_timeout;
             if self.output_busy.load(Ordering::SeqCst) || Instant::now() >= stalled_at {
                 return buffered < INPUT_HARD_LIMIT;
             }
@@ -290,8 +291,24 @@ impl Shared {
         }
     }
 
+    /// Notes that a forwarded request of `kind` awaits the builder's reply.
+    fn expect_reply(&self, kind: &'static str) {
+        self.expected_replies
+            .lock()
+            .expect("mutex poisoned")
+            .push_back(kind);
+    }
+
+    /// Takes the oldest request still awaiting the builder's reply.
+    fn take_expected_reply(&self) -> Option<&'static str> {
+        self.expected_replies
+            .lock()
+            .expect("mutex poisoned")
+            .pop_front()
+    }
+
     fn progressed(&self) {
-        *lock(&self.last_progress) = Instant::now();
+        *self.last_progress.lock().expect("mutex poisoned") = Instant::now();
     }
 
     fn input_read(&self, msg: &ChannelMsg) {
@@ -403,7 +420,7 @@ async fn tunnel_session(
                     () = tunnel.cancelled() => err = Some(anyhow!("session cancelled")),
                     () = tokio::time::sleep(client_close_grace) => {
                         warn!(
-                            grace = %fmt_duration(client_close_grace),
+                            grace = %duration::format(client_close_grace),
                             "Builder did not exit after client closed the session; forcing teardown"
                         );
                         err = Some(anyhow!("client closed the session before the builder finished"));
@@ -414,7 +431,7 @@ async fn tunnel_session(
         () = tunnel.cancelled() => err = Some(anyhow!("session cancelled")),
     }
 
-    let exit_status = *lock(&shared.exit_status);
+    let exit_status = *shared.exit_status.lock().expect("mutex poisoned");
     match builder_end {
         None | Some(Ok(BuilderEnd::Closed)) => {}
         Some(Ok(BuilderEnd::ConnectionLost)) => {
@@ -456,7 +473,7 @@ async fn tunnel_session(
         warn!("Tunnel tasks did not finish promptly");
     }
 
-    let err = err.or_else(|| lock(&shared.copy_err).take());
+    let err = err.or_else(|| shared.copy_err.lock().expect("mutex poisoned").take());
     match (&err, exit_status) {
         (Some(err), Some(status)) => {
             warn!(error = %format!("{err:#}"), exit_status = status, "Tunnel closed")
@@ -556,15 +573,15 @@ async fn write_builder(
                 Ok(())
             }
             ChannelMsg::Exec { command, .. } => {
-                lock(&shared.expected_replies).push_back("exec");
+                shared.expect_reply("exec");
                 builder.exec(true, command).await
             }
             ChannelMsg::RequestShell { .. } => {
-                lock(&shared.expected_replies).push_back("shell");
+                shared.expect_reply("shell");
                 builder.request_shell(true).await
             }
             ChannelMsg::RequestSubsystem { name, .. } => {
-                lock(&shared.expected_replies).push_back("subsystem");
+                shared.expect_reply("subsystem");
                 builder.request_subsystem(true, name).await
             }
             ChannelMsg::SetEnv {
@@ -675,17 +692,17 @@ async fn builder_to_client(
                 return BuilderEnd::Closed;
             }
             ChannelMsg::Success => {
-                lock(&shared.expected_replies).pop_front();
+                shared.take_expected_reply();
                 Ok(())
             }
             ChannelMsg::Failure => {
-                if let Some(kind) = lock(&shared.expected_replies).pop_front() {
+                if let Some(kind) = shared.take_expected_reply() {
                     return BuilderEnd::Rejected(kind);
                 }
                 Ok(())
             }
             ChannelMsg::ExitStatus { exit_status } => {
-                *lock(&shared.exit_status) = Some(exit_status);
+                *shared.exit_status.lock().expect("mutex poisoned") = Some(exit_status);
                 if broken {
                     Ok(())
                 } else {
@@ -766,6 +783,7 @@ impl client::Handler for BuilderHandler {
 }
 
 /// Why a builder could not be reached.
+#[must_use]
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum DialError {
     #[error("dial tcp {addr}: {source}")]
@@ -857,7 +875,7 @@ pub(crate) async fn dial_builder(
         if Instant::now() >= deadline {
             return Err(DialError::GaveUp {
                 attempts,
-                timeout: fmt_duration(timeout),
+                timeout: duration::format(timeout),
                 last: Box::new(err),
             });
         }

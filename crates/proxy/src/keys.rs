@@ -7,7 +7,7 @@ use k8s_openapi::api::core::v1::Secret;
 use russh::keys::PrivateKey;
 use russh::keys::ssh_key::private::{Ed25519Keypair, KeypairData};
 
-use crate::secret;
+use api::secret;
 
 /// Parses the private key stored under `key`. `Ok(None)` when absent.
 pub fn private_key_from_secret(ssh_keys: &Secret, key: &str) -> anyhow::Result<Option<PrivateKey>> {

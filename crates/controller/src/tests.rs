@@ -10,9 +10,13 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, Time};
 use kube::ResourceExt;
 use kube::runtime::events::EventType;
 
+use api::fake::FakeKube;
+use api::{
+    BuildPhase, ControllerClient, NixBuildRequest, NixBuildRequestSpec, NixBuildRequestStatus,
+};
+
 use super::*;
-use crate::api::{NixBuildRequestSpec, NixBuildRequestStatus};
-use crate::testutil::FakeKube;
+use crate::reconciler::{REQUEUE_CONFLICT, REQUEUE_CREATING, REQUEUE_RUNNING, pod_failure_reason};
 
 const NS: &str = "default";
 
@@ -514,7 +518,7 @@ async fn completed_request_is_reaped_after_ttl() {
     let mut fresh = with_finalizer(new_request("s9"));
     fresh.status = Some(NixBuildRequestStatus {
         phase: Some(BuildPhase::Completed),
-        completion_time: Some(crate::api::now()),
+        completion_time: Some(api::now()),
         ..Default::default()
     });
     fake.insert_request(fresh);

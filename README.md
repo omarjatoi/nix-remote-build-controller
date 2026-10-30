@@ -33,10 +33,14 @@ when there is no work.
    deletes the pod. If the proxy cannot delete the request, the controller
    deletes it after `--completed-ttl`.
 
-The repository has two programs, built from one Rust crate (`src/`):
+The repository is a Cargo workspace with one crate per part:
 
-- `proxy` (`src/proxy/`): the SSH server that clients connect to.
-- `controller` (`src/controller/`): creates and deletes builder pods.
+- `crates/proxy`: the SSH server that clients connect to.
+- `crates/controller`: creates and deletes builder pods.
+- `crates/api`: the `NixBuildRequest` resource and the Kubernetes calls both
+  programs make. Its `testing` feature adds an in-memory Kubernetes API for
+  tests.
+- `crates/common`: logging, HTTP servers, shutdown and flag parsing.
 
 The builder image (`flake.nix`) runs single-user Nix and `sshd` as the user
 `nixbld`.

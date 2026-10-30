@@ -49,23 +49,33 @@ pub struct Config {
     /// Caps concurrent build sessions. Zero means unlimited.
     pub max_sessions: usize,
 
-    /// Name and UID of the proxy's own pod. When both are set, every
-    /// `NixBuildRequest` gets an ownerReference to it so Kubernetes garbage
-    /// collection removes orphaned requests if the proxy pod dies.
+    /// Name of the proxy's own pod. When it and `owner_pod_uid` are set,
+    /// every `NixBuildRequest` gets an ownerReference to the pod, so
+    /// Kubernetes removes orphaned requests if the proxy pod dies.
     pub owner_pod_name: String,
+    /// UID of the proxy's own pod; see `owner_pod_name`.
     pub owner_pod_uid: String,
 }
 
-/// Defaults used when the corresponding [`Config`] field is zero or empty.
+/// Default for [`Config::pod_ready_timeout`].
 pub const DEFAULT_POD_READY_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+/// Default for [`Config::shutdown_timeout`].
 pub const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// Default for [`Config::handshake_timeout`].
 pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Default for [`Config::builder_dial_timeout`].
 pub const DEFAULT_BUILDER_DIAL_TIMEOUT: Duration = Duration::from_secs(15);
+/// Default for [`Config::poll_interval`].
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// Default for [`Config::client_close_grace`].
 pub const DEFAULT_CLIENT_CLOSE_GRACE: Duration = Duration::from_secs(30);
+/// Default for [`Config::input_stall_timeout`].
 pub const DEFAULT_INPUT_STALL_TIMEOUT: Duration = Duration::from_secs(60);
+/// Default for [`Config::remote_user`].
 pub const DEFAULT_REMOTE_USER: &str = "nixbld";
+/// Default for [`Config::remote_port`].
 pub const DEFAULT_REMOTE_PORT: u16 = 22;
+/// Default for [`Config::namespace`].
 pub const DEFAULT_NAMESPACE: &str = "default";
 
 impl Config {

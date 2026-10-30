@@ -26,10 +26,10 @@ pub fn is_already_exists(err: &kube::Error) -> bool {
 
 /// Builds an API error, as the API server would return it. Used by the
 /// in-memory fake API in tests.
-#[cfg(test)]
-pub(crate) fn api_error(code: u16, reason: &str, message: impl Into<String>) -> kube::Error {
+#[cfg(any(test, feature = "testing"))]
+pub fn new(code: u16, reason: &str, message: &str) -> kube::Error {
     kube::Error::Api(
-        kube::core::Status::failure(&message.into(), reason)
+        kube::core::Status::failure(message, reason)
             .with_code(code)
             .boxed(),
     )
@@ -41,9 +41,9 @@ mod tests {
 
     #[test]
     fn classifies_api_errors() {
-        let not_found = api_error(404, "NotFound", "gone");
-        let conflict = api_error(409, "Conflict", "stale");
-        let exists = api_error(409, "AlreadyExists", "exists");
+        let not_found = new(404, "NotFound", "gone");
+        let conflict = new(409, "Conflict", "stale");
+        let exists = new(409, "AlreadyExists", "exists");
         assert!(is_not_found(&not_found) && !is_conflict(&not_found));
         assert!(is_conflict(&conflict) && !is_already_exists(&conflict));
         assert!(is_already_exists(&exists) && !is_conflict(&exists));

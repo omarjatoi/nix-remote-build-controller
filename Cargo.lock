@@ -150,6 +150,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "api"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "k8s-openapi",
+ "kube",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "argon2"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -510,10 +523,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "common"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "serde_json",
+ "socket2",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "const-oid"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
+
+[[package]]
+name = "controller"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "api",
+ "axum",
+ "clap",
+ "common",
+ "futures",
+ "http",
+ "k8s-openapi",
+ "kube",
+ "prometheus",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tower",
+ "tracing",
+ "uuid",
+]
 
 [[package]]
 name = "core-foundation"
@@ -1847,34 +1898,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nix-remote-build-controller"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum",
- "bytes",
- "clap",
- "futures",
- "getrandom 0.3.4",
- "http",
- "k8s-openapi",
- "kube",
- "prometheus",
- "russh",
- "serde",
- "serde_json",
- "socket2",
- "thiserror",
- "tokio",
- "tokio-util",
- "tower",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
 name = "nohash-hasher"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2294,6 +2317,30 @@ dependencies = [
  "memchr",
  "parking_lot",
  "thiserror",
+]
+
+[[package]]
+name = "proxy"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "api",
+ "axum",
+ "bytes",
+ "clap",
+ "common",
+ "controller",
+ "getrandom 0.3.4",
+ "k8s-openapi",
+ "kube",
+ "russh",
+ "serde_json",
+ "socket2",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

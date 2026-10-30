@@ -1,15 +1,4 @@
-//! Creates and deletes builder pods for `NixBuildRequest` objects.
-//!
-//! Each `NixBuildRequest` belongs to one SSH build session and has one builder
-//! pod. Each reconcile step reads the current state, makes at most one change
-//! and then returns, so many requests can be processed at the same time. All
-//! state is in the request status, so a restarted controller continues where
-//! the old one stopped.
-
-mod client;
-mod config;
-pub mod leader;
-mod runner;
+//! The reconcile logic: one step towards the desired state per call.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -24,21 +13,19 @@ use kube::runtime::events::EventType;
 use kube::{Resource, ResourceExt};
 use tracing::{Instrument, debug, error_span, info, warn};
 
-use crate::api::{self, BuildPhase, NixBuildRequest, NixBuildRequestStatus};
-use crate::kube_util::{is_already_exists, is_conflict, is_not_found};
-use crate::secret;
-
-pub use client::{ControllerClient, KubeControllerClient};
-pub use config::{parse_pull_policy, parse_resources};
-pub use runner::{Metrics, Runner};
+use api::{BuildEvent, BuildPhase, ControllerClient, NixBuildRequest, NixBuildRequestStatus};
+use api::{kube_error, secret};
+use common::duration;
 
 /// Finalizer guarding builder pod cleanup.
 pub const FINALIZER_NAME: &str = "nix.io/cleanup";
 
-/// Label keys and values set on builder pods (alongside
-/// [`api::LABEL_SESSION_ID`]).
+// Labels set on builder pods, alongside `api::LABEL_SESSION_ID`.
+/// Label key that marks builder pods.
 pub const LABEL_APP: &str = "app";
+/// Value of [`LABEL_APP`] on builder pods.
 pub const LABEL_APP_VALUE: &str = "nix-builder";
+/// Label holding the name of the pod's `NixBuildRequest`.
 pub const LABEL_BUILD_REQUEST: &str = "nix.io/build-request";
 
 /// Where an optional shared builder host key is mounted; the builder entrypoint
@@ -55,9 +42,9 @@ pub const DEFAULT_MAX_CONCURRENT_RECONCILES: u16 = 10;
 /// Gives sshd a moment to close sessions when a builder pod is deleted.
 pub const DEFAULT_POD_TERMINATION_GRACE_PERIOD_SECONDS: i64 = 10;
 
-const REQUEUE_CREATING: Duration = Duration::from_secs(2);
-const REQUEUE_RUNNING: Duration = Duration::from_secs(30);
-const REQUEUE_CONFLICT: Duration = Duration::from_millis(100);
+pub(crate) const REQUEUE_CREATING: Duration = Duration::from_secs(2);
+pub(crate) const REQUEUE_RUNNING: Duration = Duration::from_secs(30);
+pub(crate) const REQUEUE_CONFLICT: Duration = Duration::from_millis(100);
 
 /// What the reconciler wants to happen next for an object.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +66,7 @@ impl ReconcileAction {
 }
 
 /// A failed API operation; the controller retries the object with backoff.
+#[must_use]
 #[derive(Debug, thiserror::Error)]
 #[error("{op}: {source}")]
 pub struct ReconcileError {
@@ -93,18 +81,6 @@ impl ReconcileError {
             source: Box::new(source),
         }
     }
-}
-
-/// An event recorded on a `NixBuildRequest` (events.k8s.io/v1).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BuildEvent {
-    pub type_: EventType,
-    /// Machine-readable cause, e.g. `PodCreated`.
-    pub reason: &'static str,
-    /// The operation being performed, e.g. `CreatePod`.
-    pub action: &'static str,
-    /// Human-readable description.
-    pub note: String,
 }
 
 /// Static configuration of the reconciler.
@@ -214,7 +190,7 @@ impl<C: ControllerClient> Reconciler<C> {
                 let note = format!("Created builder pod {pod_name}");
                 self.event(req, EventType::Normal, "PodCreated", "CreatePod", note);
             }
-            Err(err) if is_already_exists(&err) => {
+            Err(err) if kube_error::is_already_exists(&err) => {
                 info!(pod = %pod_name, "Builder pod already exists, adopting it");
             }
             Err(err) => {
@@ -260,7 +236,7 @@ impl<C: ControllerClient> Reconciler<C> {
             "Failed" => {
                 let reason = pod_failure_reason(&pod);
                 let message = format!("Builder pod failed before it became ready: {reason}");
-                return self.fail(req, "PodFailed", message).await;
+                return self.fail(req, "PodFailed", &message).await;
             }
             "Succeeded" => {
                 return self
@@ -330,7 +306,7 @@ impl<C: ControllerClient> Reconciler<C> {
             "Failed" => {
                 let reason = pod_failure_reason(&pod);
                 let message = format!("Builder pod failed while running: {reason}");
-                self.fail(req, "PodFailed", message).await
+                self.fail(req, "PodFailed", &message).await
             }
             "Succeeded" => {
                 let mut updated = req.clone();
@@ -361,13 +337,13 @@ impl<C: ControllerClient> Reconciler<C> {
         if !remaining.is_zero() {
             return Ok(ReconcileAction::Requeue(remaining));
         }
-        info!(ttl = %crate::duration::format(ttl), "Deleting finished NixBuildRequest after TTL");
+        info!(ttl = %duration::format(ttl), "Deleting finished NixBuildRequest after TTL");
         match self
             .client
             .delete_request(&namespace(req), &req.name_any())
             .await
         {
-            Err(err) if !is_not_found(&err) => {
+            Err(err) if !kube_error::is_not_found(&err) => {
                 Err(ReconcileError::new("delete finished NixBuildRequest", err))
             }
             _ => Ok(ReconcileAction::AwaitChange),
@@ -378,22 +354,21 @@ impl<C: ControllerClient> Reconciler<C> {
         &self,
         req: &NixBuildRequest,
         reason: &'static str,
-        message: impl Into<String>,
+        message: &str,
     ) -> ReconcileResult {
-        let message = message.into();
         warn!(reason, "{message}");
         self.event(
             req,
             EventType::Warning,
             reason,
             "Reconcile",
-            message.clone(),
+            message.to_string(),
         );
         let mut updated = req.clone();
         let status = status_mut(&mut updated);
         status.phase = Some(BuildPhase::Failed);
         status.completion_time = Some(api::now());
-        status.message = message;
+        status.message = message.to_string();
         self.update_status(&updated, ReconcileAction::Requeue(self.completed_ttl()))
             .await
     }
@@ -440,7 +415,7 @@ impl<C: ControllerClient> Reconciler<C> {
                 info!(pod = %pod_name, "Deleted builder pod");
                 Ok(())
             }
-            Err(err) if is_not_found(&err) => Ok(()),
+            Err(err) if kube_error::is_not_found(&err) => Ok(()),
             Err(err) => Err(err),
         }
     }
@@ -481,12 +456,13 @@ impl<C: ControllerClient> Reconciler<C> {
             Some(_) => None,
         };
         let spec_resources = &req.spec.resources;
-        let resources =
-            if is_empty_map(&spec_resources.requests) && is_empty_map(&spec_resources.limits) {
-                self.cfg.default_resources.clone()
-            } else {
-                spec_resources.clone()
-            };
+        let resources = if is_empty_map(spec_resources.requests.as_ref())
+            && is_empty_map(spec_resources.limits.as_ref())
+        {
+            self.cfg.default_resources.clone()
+        } else {
+            spec_resources.clone()
+        };
         let image = if req.spec.image.is_empty() {
             self.cfg.builder_image.clone()
         } else {
@@ -633,8 +609,8 @@ fn status_mut(req: &mut NixBuildRequest) -> &mut NixBuildRequestStatus {
         .get_or_insert_with(NixBuildRequestStatus::default)
 }
 
-fn is_empty_map<V>(map: &Option<BTreeMap<String, V>>) -> bool {
-    map.as_ref().is_none_or(BTreeMap::is_empty)
+fn is_empty_map<V>(map: Option<&BTreeMap<String, V>>) -> bool {
+    map.is_none_or(BTreeMap::is_empty)
 }
 
 /// Maps an API error onto the next action. Conflicts mean the object changed
@@ -642,11 +618,11 @@ fn is_empty_map<V>(map: &Option<BTreeMap<String, V>>) -> bool {
 /// with a fresh read. That is expected, not an error. A vanished object needs
 /// nothing more.
 fn retry_on_conflict(op: &'static str, err: kube::Error) -> ReconcileResult {
-    if is_conflict(&err) {
+    if kube_error::is_conflict(&err) {
         debug!(op, "Conflict, requeuing");
         return Ok(ReconcileAction::Requeue(REQUEUE_CONFLICT));
     }
-    if is_not_found(&err) {
+    if kube_error::is_not_found(&err) {
         return Ok(ReconcileAction::AwaitChange);
     }
     Err(ReconcileError::new(op, err))
@@ -694,7 +670,7 @@ fn pod_pending_reason(pod: &Pod) -> Option<String> {
 }
 
 /// Summarises why a pod failed.
-fn pod_failure_reason(pod: &Pod) -> String {
+pub(crate) fn pod_failure_reason(pod: &Pod) -> String {
     let Some(status) = pod.status.as_ref() else {
         return "unknown".to_string();
     };
@@ -721,6 +697,3 @@ fn pod_failure_reason(pod: &Pod) -> String {
     }
     "unknown".to_string()
 }
-
-#[cfg(test)]
-mod tests;

@@ -17,13 +17,14 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use super::keys::generate_host_key;
-use super::session::build_request_name;
-use super::stream::CancellableStream;
-use super::tunnel::{BuilderAuth, DialError, dial_builder};
+use api::fake::FakeKube;
+use api::{BuildPhase, NixBuildRequest, NixBuildRequestStatus};
+
 use super::*;
-use crate::api::{BuildPhase, NixBuildRequest, NixBuildRequestStatus};
-use crate::testutil::FakeKube;
+use crate::keys::generate_host_key;
+use crate::session::build_request_name;
+use crate::stream::CancellableStream;
+use crate::tunnel::{BuilderAuth, DialError, dial_builder};
 
 const NS: &str = "nix-test";
 
@@ -700,7 +701,7 @@ async fn build_request_carries_timeout_labels_and_owner_reference() {
         Some(build_request_name(&req.spec.session_id).as_str())
     );
     let labels = req.metadata.labels.as_ref().unwrap();
-    assert_eq!(labels[crate::api::LABEL_SESSION_ID], req.spec.session_id);
+    assert_eq!(labels[api::LABEL_SESSION_ID], req.spec.session_id);
     assert_eq!(labels[LABEL_MANAGED_BY], MANAGED_BY_VALUE);
     assert_eq!(
         req.metadata.annotations.as_ref().unwrap()[ANNOTATION_PROXY_POD],
@@ -903,7 +904,7 @@ async fn failed_sessions_record_their_outcome_before_deletion() {
     .await;
     let mut req = h.requests().remove(0);
     req.metadata.finalizers = Some(vec!["test/hold".into()]);
-    crate::controller::ControllerClient::replace_request(&h.fake, &req)
+    api::ControllerClient::replace_request(&h.fake, &req)
         .await
         .unwrap();
 
