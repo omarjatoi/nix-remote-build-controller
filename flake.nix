@@ -16,22 +16,56 @@
       system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
-        version = "0.1.0";
+        lib = pkgs.lib;
+        cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
+        version = cargoToml.package.version;
 
-        # Build a Go binary for a given pkgs set
-        buildGoApp =
-          goPkgs: name:
-          goPkgs.buildGoModule {
+        # Only the Rust sources affect the build; manifests and docs do not.
+        rustSrc = lib.fileset.toSource {
+          root = ./.;
+          fileset = lib.fileset.unions [
+            ./Cargo.toml
+            ./Cargo.lock
+            ./src
+          ];
+        };
+
+        # Build one of the crate's binaries (`controller` or `proxy`).
+        buildRustApp =
+          name:
+          pkgs.rustPlatform.buildRustPackage {
             pname = name;
             inherit version;
-            src = ./.;
-            vendorHash = "sha256-e4dLY+rLKK2VxINuLQNADEK/dCTVGvd2OtRh7aUYycY=";
-            subPackages = [ "cmd/${name}" ];
-            ldflags = [
-              "-s"
-              "-w"
-              "-X main.version=${version}"
+            src = rustSrc;
+            cargoLock.lockFile = ./Cargo.lock;
+            cargoBuildFlags = [
+              "--bin"
+              name
             ];
+            # The test suite runs once, in `checks`, rather than per binary.
+            doCheck = false;
+            meta.mainProgram = name;
+          };
+
+        # A check that runs one cargo command against the vendored dependencies.
+        cargoCheck =
+          name: command:
+          pkgs.rustPlatform.buildRustPackage {
+            pname = "nix-remote-build-controller-${name}";
+            inherit version;
+            src = rustSrc;
+            cargoLock.lockFile = ./Cargo.lock;
+            nativeBuildInputs = [
+              pkgs.clippy
+              pkgs.rustfmt
+            ];
+            buildPhase = ''
+              runHook preBuild
+              ${command}
+              runHook postBuild
+            '';
+            doCheck = false;
+            installPhase = "touch $out";
           };
 
         # Build a container image for a given app
@@ -53,8 +87,8 @@
       {
         packages = {
           # Native binaries for local development
-          controller = buildGoApp pkgs "controller";
-          proxy = buildGoApp pkgs "proxy";
+          controller = buildRustApp "controller";
+          proxy = buildRustApp "proxy";
 
           # Container images (uses current system's pkgs - works on Linux runners)
           controller-image = buildImage pkgs "controller" self.packages.${system}.controller;
@@ -181,10 +215,20 @@
           default = self.packages.${system}.controller;
         };
 
+        # `nix flake check` runs formatting, lints and the full test suite.
+        checks = {
+          fmt = cargoCheck "fmt" "cargo fmt --check";
+          clippy = cargoCheck "clippy" "cargo clippy --all-targets --locked --offline -- -D warnings";
+          tests = cargoCheck "tests" "cargo test --locked --offline";
+        };
+
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
-            go
-            golangci-lint
+            cargo
+            rustc
+            clippy
+            rustfmt
+            rust-analyzer
             nixfmt
             # End-to-end and manifest tooling.
             kind

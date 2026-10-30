@@ -2,39 +2,31 @@
 # Most targets assume the Nix dev shell tooling is available; run `nix develop`
 # (or `direnv allow`) first, or prefix a target with `nix develop -c`.
 
-GO ?= go
-# The Nix toolchain on macOS cannot statically link net/os on darwin; keep cgo off.
-export CGO_ENABLED ?= 0
+CARGO ?= cargo
 
-.PHONY: all build test race lint fmt fmt-check vet tidy nixfmt \
+.PHONY: all build test lint fmt fmt-check check nixfmt \
         images manifests validate e2e clean help
 
-all: fmt-check vet lint test ## Format-check, vet, lint and test
+all: fmt-check lint test ## Format-check, lint and test
 
-build: ## Build the Go binaries
-	$(GO) build ./...
+build: ## Build the controller and proxy binaries
+	$(CARGO) build --release --locked
 
-test: ## Run unit tests
-	$(GO) test -count=1 ./...
+test: ## Run unit and integration tests
+	$(CARGO) test --locked
 
-race: ## Run unit tests with the race detector
-	$(GO) test -race -count=1 ./...
+lint: ## cargo clippy (warnings are errors)
+	$(CARGO) clippy --all-targets --locked -- -D warnings
 
-vet: ## go vet
-	$(GO) vet ./...
-
-lint: ## golangci-lint
-	golangci-lint run ./...
-
-fmt: ## Format Go and Nix sources
-	gofmt -w .
+fmt: ## Format Rust and Nix sources
+	$(CARGO) fmt
 	nixfmt flake.nix
 
 fmt-check: ## Fail if sources are not formatted
-	@out=$$(gofmt -l .); if [ -n "$$out" ]; then echo "gofmt needed:"; echo "$$out"; exit 1; fi
+	$(CARGO) fmt --check
 
-tidy: ## go mod tidy
-	$(GO) mod tidy
+check: ## Run the flake checks (format, lint, tests) in the Nix sandbox
+	nix flake check
 
 images: ## Build all container images for the host's Linux system
 	nix build .#builder-image .#proxy-image .#controller-image
@@ -50,8 +42,8 @@ e2e: ## Run the full Kind-based end-to-end test
 	bash test/e2e/run.sh
 
 clean: ## Remove build artifacts
-	rm -f result result-* controller proxy
-	rm -rf ./bin
+	rm -f result result-*
+	$(CARGO) clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
