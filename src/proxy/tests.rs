@@ -19,6 +19,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::keys::generate_host_key;
 use super::session::build_request_name;
+use super::stream::CancellableStream;
 use super::tunnel::{BuilderAuth, DialError, dial_builder};
 use super::*;
 use crate::api::{BuildPhase, NixBuildRequest, NixBuildRequestStatus};
@@ -44,7 +45,10 @@ async fn wait_until(what: &str, timeout: Duration, mut cond: impl FnMut() -> boo
 
 #[derive(Default)]
 struct BuilderStats {
+    /// Sessions open on the builder, with or without a command yet.
     active: AtomicI32,
+    /// Sessions whose command has started.
+    running: AtomicI32,
     peak: AtomicI32,
     sessions: AtomicI32,
     /// Monotonic count of sessions that reached the wait-for-peers barrier.
@@ -110,7 +114,9 @@ impl FakeBuilder {
                 let handler = BuilderConn {
                     shared: shared.clone(),
                     closed: CancellationToken::new(),
+                    sever: CancellationToken::new(),
                 };
+                let stream = CancellableStream::new(stream, handler.sever.clone());
                 let config = Arc::clone(&config);
                 tokio::spawn(async move {
                     let closed = handler.closed.clone();
@@ -141,6 +147,8 @@ struct BuilderConn {
     shared: BuilderShared,
     /// Cancelled when the connection ends.
     closed: CancellationToken,
+    /// Cancelling it drops the connection.
+    sever: CancellationToken,
 }
 
 impl server::Handler for BuilderConn {
@@ -173,6 +181,7 @@ impl server::Handler for BuilderConn {
             channel,
             self.shared.clone(),
             self.closed.clone(),
+            self.sever.clone(),
         ));
         Ok(())
     }
@@ -211,6 +220,7 @@ async fn run_builder_session(
     mut channel: Channel<Msg>,
     shared: BuilderShared,
     closed: CancellationToken,
+    sever: CancellationToken,
 ) {
     let stats = &shared.stats;
     stats.sessions.fetch_add(1, Ordering::SeqCst);
@@ -237,9 +247,16 @@ async fn run_builder_session(
         "stdin arrived before exec: {early_stdin:?}"
     );
     let cmd = cmd.unwrap();
+    stats.running.fetch_add(1, Ordering::SeqCst);
 
     let status = match cmd.as_str() {
         "echo-upper" => echo_upper(&mut channel).await,
+        "crash" => {
+            // The builder's connection drops before the command finishes.
+            sever.cancel();
+            closed.cancelled().await;
+            0
+        }
         "stall" => {
             // Never read stdin: the builder is hung.
             closed.cancelled().await;
@@ -296,6 +313,7 @@ async fn run_builder_session(
     let _ = channel.eof().await;
     let _ = channel.exit_status(status).await;
     let _ = channel.close().await;
+    stats.running.fetch_sub(1, Ordering::SeqCst);
     stats.active.fetch_sub(1, Ordering::SeqCst);
 }
 
@@ -427,7 +445,7 @@ impl Harness {
             remote_port: builder.addr.port(),
             pod_ready_timeout: Duration::from_secs(5),
             poll_interval: Duration::from_millis(10),
-            keepalive_interval: Duration::from_millis(200),
+            keepalive_interval: Duration::from_secs(2),
             client_close_grace: Duration::from_secs(1),
             shutdown_timeout: Duration::from_secs(10),
             build_timeout: Duration::from_secs(90 * 60),
@@ -788,6 +806,22 @@ async fn large_payloads_survive_flow_control() {
 }
 
 #[tokio::test]
+async fn lost_builder_connection_is_reported_to_client() {
+    let mut h = Harness::new(HarnessOpts::default()).await;
+    let client = h.dial().await;
+    let out = run_command(&client, "crash", "").await;
+    assert_eq!(out.exit_status, Some(255), "{out:?}");
+    assert!(
+        out.stderr
+            .contains("builder connection closed before the remote command finished"),
+        "{out:?}"
+    );
+    drop(client);
+    h.wait_no_requests().await;
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn controller_failure_is_reported_to_client() {
     let mut h = Harness::new(HarnessOpts {
         mode: ControllerMode::Failed,
@@ -899,7 +933,7 @@ async fn client_disconnect_tears_down_builder_session() {
         .await
         .unwrap();
     wait_until("the builder session", Duration::from_secs(5), || {
-        h.builder.stats.active.load(Ordering::SeqCst) == 1
+        h.builder.stats.running.load(Ordering::SeqCst) == 1
     })
     .await;
 
@@ -955,7 +989,7 @@ async fn client_channel_close_gives_builder_grace_then_forces() {
     let channel = client.channel_open_session().await.unwrap();
     channel.exec(true, "hang").await.unwrap();
     wait_until("the builder session", Duration::from_secs(5), || {
-        h.builder.stats.active.load(Ordering::SeqCst) == 1
+        h.builder.stats.running.load(Ordering::SeqCst) == 1
     })
     .await;
 
@@ -995,7 +1029,7 @@ async fn client_close_without_eof_still_ends_builder_stdin() {
         .await
         .unwrap();
     wait_until("the builder session", Duration::from_secs(5), || {
-        h.builder.stats.active.load(Ordering::SeqCst) == 1
+        h.builder.stats.running.load(Ordering::SeqCst) == 1
     })
     .await;
 
@@ -1034,7 +1068,7 @@ async fn client_leaving_a_stalled_builder_ends_the_session() {
     let channel = client.channel_open_session().await.unwrap();
     channel.exec(true, "stall").await.unwrap();
     wait_until("the builder session", Duration::from_secs(5), || {
-        h.builder.stats.active.load(Ordering::SeqCst) == 1
+        h.builder.stats.running.load(Ordering::SeqCst) == 1
     })
     .await;
 
@@ -1122,7 +1156,11 @@ async fn client_public_key_authentication() {
 /// it: SSH clients end the connection on unexpected messages during login.
 #[tokio::test]
 async fn slow_login_is_not_interrupted_by_keepalives() {
-    let mut h = Harness::new(HarnessOpts::default()).await;
+    let mut h = Harness::new(HarnessOpts {
+        cfg: |c| c.keepalive_interval = Duration::from_millis(200),
+        ..Default::default()
+    })
+    .await;
     let config = Arc::new(client::Config {
         inactivity_timeout: None,
         ..Default::default()
@@ -1130,7 +1168,7 @@ async fn slow_login_is_not_interrupted_by_keepalives() {
     let mut handle = client::connect(config, h.proxy.local_addr(), TestClient)
         .await
         .unwrap();
-    // Several keepalive intervals (200ms in the harness).
+    // Several keepalive intervals.
     tokio::time::sleep(Duration::from_millis(700)).await;
     let key = PrivateKeyWithHashAlg::new(Arc::new(h.client_key.clone()), None);
     let auth = handle.authenticate_publickey("nixbld", key).await.unwrap();
@@ -1172,7 +1210,7 @@ async fn health_endpoints_track_shutdown() {
     let channel = client.channel_open_session().await.unwrap();
     channel.exec(true, "hang").await.unwrap();
     wait_until("the builder session", Duration::from_secs(5), || {
-        h.builder.stats.active.load(Ordering::SeqCst) == 1
+        h.builder.stats.running.load(Ordering::SeqCst) == 1
     })
     .await;
     h.shutdown.cancel();
@@ -1218,7 +1256,7 @@ async fn shutdown_drains_in_flight_sessions_and_refuses_new_connections() {
     let mut channel = client.channel_open_session().await.unwrap();
     channel.exec(true, "echo-upper").await.unwrap();
     wait_until("the builder session", Duration::from_secs(5), || {
-        h.builder.stats.active.load(Ordering::SeqCst) == 1
+        h.builder.stats.running.load(Ordering::SeqCst) == 1
     })
     .await;
 
@@ -1277,7 +1315,7 @@ async fn shutdown_timeout_forces_sessions_closed() {
     let channel = client.channel_open_session().await.unwrap();
     channel.exec(true, "hang").await.unwrap();
     wait_until("the builder session", Duration::from_secs(5), || {
-        h.builder.stats.active.load(Ordering::SeqCst) == 1
+        h.builder.stats.running.load(Ordering::SeqCst) == 1
     })
     .await;
 
