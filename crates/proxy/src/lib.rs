@@ -8,7 +8,7 @@
 
 mod auth;
 mod config;
-pub mod keys;
+mod keys;
 mod server;
 mod session;
 mod stream;

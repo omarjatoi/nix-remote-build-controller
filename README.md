@@ -208,7 +208,7 @@ kind: NixBuildRequest
 metadata:
   name: build-<session-id>
 spec:
-  sessionId: "<session-id>"
+  sessionId: "<session-id>"  # lowercase letters, digits and "-"; at most 51 characters
   resources: {}         # optional; the controller defaults apply if empty
   timeoutSeconds: 3600  # optional; maximum pod life (0 means no limit)
   image: ""             # optional; replaces --builder-image

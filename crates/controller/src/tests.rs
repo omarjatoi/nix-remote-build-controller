@@ -1,3 +1,5 @@
+//! Reconciler tests against the in-memory Kubernetes API.
+
 use std::collections::BTreeMap;
 use std::time::Duration;
 

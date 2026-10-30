@@ -1,3 +1,5 @@
+//! Settings of the SSH proxy and their defaults.
+
 use std::time::Duration;
 
 /// Runtime configuration of the SSH proxy.
