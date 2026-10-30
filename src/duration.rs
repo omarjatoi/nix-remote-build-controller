@@ -1,9 +1,7 @@
-//! Go-style duration strings ("30s", "5m", "1h30m", "250ms").
+//! Duration strings for command-line flags: "30s", "5m", "1h30m", "250ms".
 //!
-//! The command-line flags and deployment manifests use Go's `time.Duration`
-//! syntax, so the same strings are accepted here. Negative durations are
-//! clamped to zero: every flag that takes a duration treats "zero or less" as
-//! "use the default" or "disabled", so the sign carries no other meaning.
+//! Negative durations become zero: every flag that takes a duration treats
+//! zero as "use the default" or "disabled".
 
 use std::fmt::Write as _;
 use std::time::Duration;
@@ -16,9 +14,9 @@ const MAX_FRACTION_DIGITS: usize = 19;
 #[error("invalid duration {0:?}")]
 pub struct ParseDurationError(String);
 
-/// Parses a duration in Go's `time.ParseDuration` syntax: an optional sign
-/// followed by one or more decimal numbers, each with a unit suffix (`ns`,
-/// `us`, `µs`, `μs`, `ms`, `s`, `m`, `h`). A bare `0` is also accepted.
+/// Parses a duration: an optional sign followed by one or more decimal
+/// numbers, each with a unit (`ns`, `us`, `µs`, `μs`, `ms`, `s`, `m`, `h`).
+/// A bare `0` is also accepted.
 pub fn parse(input: &str) -> Result<Duration, ParseDurationError> {
     let err = || ParseDurationError(input.to_string());
     let mut s = input;
@@ -95,7 +93,7 @@ pub fn parse(input: &str) -> Result<Duration, ParseDurationError> {
     Ok(Duration::new(secs, (total_nanos % 1_000_000_000) as u32))
 }
 
-/// Formats a duration the way Go's `time.Duration.String` does, for logs.
+/// Formats a duration for logs, for example `1h30m0s` or `250ms`.
 pub fn format(d: Duration) -> String {
     let nanos = d.as_nanos();
     if nanos == 0 {
@@ -137,7 +135,7 @@ fn trim_fraction(value: u128, unit: u128) -> String {
     format!("{whole}.{}", frac.trim_end_matches('0'))
 }
 
-/// A clap value parser for Go-style durations.
+/// A clap value parser for durations.
 pub fn clap_parser(s: &str) -> Result<Duration, String> {
     parse(s).map_err(|e| e.to_string())
 }
@@ -147,7 +145,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_go_durations() {
+    fn parses_durations() {
         let cases = [
             ("0", Duration::ZERO),
             ("0s", Duration::ZERO),
@@ -183,7 +181,7 @@ mod tests {
     }
 
     #[test]
-    fn formats_like_go() {
+    fn formats_durations() {
         assert_eq!(format(Duration::ZERO), "0s");
         assert_eq!(format(Duration::from_millis(100)), "100ms");
         assert_eq!(format(Duration::from_millis(1500)), "1.5s");

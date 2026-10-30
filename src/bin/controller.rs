@@ -295,7 +295,7 @@ async fn secret_has_builder_host_key(
 }
 
 /// A unique identity for leader election and event reporting: the pod name
-/// (HOSTNAME in Kubernetes) plus a random suffix, like controller-runtime.
+/// (HOSTNAME in Kubernetes) plus a random suffix.
 fn leader_identity() -> String {
     let host = std::env::var("HOSTNAME")
         .ok()
@@ -319,7 +319,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_flags_like_the_go_version() {
+    fn parses_flags() {
         let cli = Cli::try_parse_from([
             "controller",
             "--builder-image=img:1",

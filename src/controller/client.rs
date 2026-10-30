@@ -112,7 +112,7 @@ impl ControllerClient for KubeControllerClient {
             action: event.action.to_string(),
             secondary: None,
         };
-        // Like controller-runtime's recorder, publishing is fire-and-forget so
+        // Publishing is fire-and-forget so
         // an events API hiccup never slows down or fails a reconcile.
         tokio::spawn(async move {
             if let Err(err) = recorder.publish(&event, &reference).await {

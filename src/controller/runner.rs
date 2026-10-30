@@ -25,12 +25,12 @@ use crate::lock;
 
 const CONTROLLER_NAME: &str = "nixbuildrequest";
 
-/// Per-object retry backoff after a failed reconcile, as controller-runtime's
-/// default rate limiter: 5ms doubling up to 1000s, reset on success.
+/// Per-object retry backoff after a failed reconcile: 5ms doubling up to 1000s,
+/// reset on success.
 const BACKOFF_BASE: Duration = Duration::from_millis(5);
 const BACKOFF_MAX: Duration = Duration::from_secs(1000);
 
-/// Prometheus metrics for the controller, named after controller-runtime's.
+/// Prometheus metrics for the controller.
 pub struct Metrics {
     registry: Registry,
     reconcile_total: IntCounterVec,

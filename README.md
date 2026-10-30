@@ -164,7 +164,7 @@ To see the builds, run `kubectl get nixbuildrequests -w` and
 | `--shutdown-timeout` | `30m` | After SIGTERM, time that running builds can continue |
 | `--keepalive-interval` | `30s` | SSH keepalive interval (`0` turns keepalives off) |
 | `--max-sessions` | `0` | Maximum number of builds at the same time (`0` means no limit) |
-| `--log-level` | `info` | `trace`, `debug`, `info`, `warn` or `error` |
+| `--log-level` | `info` | `trace`, `debug`, `info`, `warn`, `error` or `off` |
 
 ### Controller
 
@@ -184,7 +184,7 @@ To see the builds, run `kubectl get nixbuildrequests -w` and
 | `--metrics-addr` | `0` | Address for Prometheus metrics (`0` turns metrics off) |
 | `--leader-elect` | `false` | Use leader election. Necessary with more than one replica. |
 | `--shutdown-timeout` | `30s` | After SIGTERM, time to finish the current work |
-| `--log-level` | `info` | `trace`, `debug`, `info`, `warn` or `error` |
+| `--log-level` | `info` | `trace`, `debug`, `info`, `warn`, `error` or `off` |
 
 Both programs write JSON logs to stderr. If `RUST_LOG` is set, it replaces
 `--log-level`.

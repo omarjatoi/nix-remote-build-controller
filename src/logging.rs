@@ -3,20 +3,18 @@
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::EnvFilter;
 
-/// Parses a `--log-level` value. The accepted names match zerolog's, which the
-/// deployment manifests were written against: `trace`, `debug`, `info`,
-/// `warn`, `error`, plus `fatal`, `panic` and `disabled`, which silence the
-/// logs (nothing is logged above error level).
+/// Parses a `--log-level` value: `trace`, `debug`, `info`, `warn`, `error` or
+/// `off`.
 pub fn parse_level(level: &str) -> Result<LevelFilter, String> {
     match level.trim().to_ascii_lowercase().as_str() {
         "trace" => Ok(LevelFilter::TRACE),
         "debug" => Ok(LevelFilter::DEBUG),
-        "info" | "" => Ok(LevelFilter::INFO),
-        "warn" | "warning" => Ok(LevelFilter::WARN),
+        "info" => Ok(LevelFilter::INFO),
+        "warn" => Ok(LevelFilter::WARN),
         "error" => Ok(LevelFilter::ERROR),
-        "fatal" | "panic" | "disabled" | "off" => Ok(LevelFilter::OFF),
+        "off" => Ok(LevelFilter::OFF),
         other => Err(format!(
-            "unknown level {other:?} (want trace, debug, info, warn, error or disabled)"
+            "unknown level {other:?} (want trace, debug, info, warn, error or off)"
         )),
     }
 }
@@ -60,7 +58,8 @@ mod tests {
         assert_eq!(parse_level("info"), Ok(LevelFilter::INFO));
         assert_eq!(parse_level("DEBUG"), Ok(LevelFilter::DEBUG));
         assert_eq!(parse_level("warn"), Ok(LevelFilter::WARN));
-        assert_eq!(parse_level("disabled"), Ok(LevelFilter::OFF));
+        assert_eq!(parse_level("off"), Ok(LevelFilter::OFF));
+        assert!(parse_level("disabled").is_err());
         assert!(parse_level("verbose").is_err());
     }
 

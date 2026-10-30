@@ -14,13 +14,12 @@ use tracing::{error, info, warn};
 /// How long [`HttpServer::shutdown`] waits for in-flight requests.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Binds a TCP listener for a Go-style address: `":2222"` means every
-/// interface, otherwise `host:port` (host may be a name, an IPv4 address or a
-/// bracketed IPv6 address).
+/// Binds a TCP listener. `":2222"` means every interface; otherwise the
+/// address is `host:port` (host may be a name, an IPv4 address or a bracketed
+/// IPv6 address).
 ///
-/// For the all-interfaces form the listener is a dual-stack IPv6 socket, as
-/// Go's `net.Listen("tcp", ":port")` creates, falling back to IPv4 on hosts
-/// with IPv6 disabled.
+/// For every interface the listener is a dual-stack IPv6 socket that also
+/// accepts IPv4, or IPv4 only on hosts with IPv6 turned off.
 pub async fn bind(addr: &str) -> anyhow::Result<TcpListener> {
     let Some(port) = addr.strip_prefix(':') else {
         return TcpListener::bind(addr)
@@ -106,7 +105,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn binds_go_style_addresses() {
+    async fn binds_addresses() {
         let any = bind(":0").await.expect("bind :0");
         let any_addr = any.local_addr().unwrap();
         assert!(any_addr.ip().is_unspecified());

@@ -167,7 +167,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_flags_like_the_go_version() {
+    fn parses_flags() {
         let cli = Cli::try_parse_from([
             "proxy",
             "-p",

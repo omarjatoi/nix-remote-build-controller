@@ -62,9 +62,9 @@ impl ClientAuthorizer {
 
 /// Parses one authorized_keys line: `[options] keytype base64 [comment]`.
 ///
-/// Like Go's `ssh.ParseAuthorizedKey`, the line is first tried as a bare key;
-/// otherwise the leading options field (which may contain quoted strings with
-/// spaces and backslash escapes) is skipped and the rest parsed as the key.
+/// The line is first tried as a bare key; otherwise the leading options field
+/// (which may contain quoted strings with spaces and backslash escapes) is
+/// skipped and the rest parsed as the key.
 fn parse_authorized_key(line: &str) -> anyhow::Result<PublicKey> {
     if let Ok(key) = PublicKey::from_openssh(line) {
         return Ok(key);

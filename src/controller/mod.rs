@@ -563,8 +563,7 @@ impl<C: ControllerClient> Reconciler<C> {
                     ),
                     (LABEL_BUILD_REQUEST.to_string(), req.name_any()),
                 ])),
-                // As controller-runtime's NewControllerRef: foreground deletion
-                // of the request waits for its pod.
+                // Foreground deletion of the request waits for its pod.
                 owner_references: req.controller_owner_ref(&()).map(|owner| {
                     vec![OwnerReference {
                         block_owner_deletion: Some(true),

@@ -1,5 +1,4 @@
-//! Lease-based leader election (coordination.k8s.io/v1), compatible with
-//! client-go's `leaderelection` package and its default timings.
+//! Leader election with a Kubernetes Lease (coordination.k8s.io/v1).
 //!
 //! Expiry is judged against the local clock at which the lease record was last
 //! seen to change, never against the timestamps written in the lease, so clock
@@ -37,7 +36,7 @@ pub struct LeaderElectionConfig {
 }
 
 impl LeaderElectionConfig {
-    /// controller-runtime's defaults: 15s lease, 10s renew deadline, 2s retry.
+    /// Defaults: 15s lease, 10s renew deadline, 2s retry.
     pub fn new(
         namespace: impl Into<String>,
         name: impl Into<String>,
@@ -128,7 +127,7 @@ impl LeaderElector {
                 Ok(Ok(Attempt::HeldByOther)) => {
                     return Err(LeadershipLost("lease was taken by another replica".into()));
                 }
-                // Retried until the renew deadline, like client-go.
+                // Retried until the renew deadline.
                 Ok(Ok(Attempt::Conflict)) => {
                     debug!("Leader lease changed while renewing, retrying")
                 }
