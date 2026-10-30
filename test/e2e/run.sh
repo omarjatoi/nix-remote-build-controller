@@ -7,13 +7,18 @@
 # that top waits for them, that the result transfers back, that a failing
 # derivation fails cleanly, and that all pods and requests are cleaned up.
 #
-# Requires on PATH: kind, kubectl, docker, nix, jq, ssh, ssh-keygen.
+# HA=1 runs on a three-node cluster with two controller replicas using leader
+# election, and checks that a standby takes over when the leader pod is deleted.
+#
+# Requires on PATH: kind, kubectl, docker, nix, jq, ssh, ssh-keygen, perl.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CLUSTER="nix-remote-build-e2e"
 NS="default"
 KEEP="${KEEP:-0}"
+HA="${HA:-0}"
+LEASE="nix-remote-build-controller.nix.io"
 SLEEP_SECONDS="${SLEEP_SECONDS:-30}"
 PROXY_PORT="${PROXY_LOCAL_PORT:-2222}"
 MARKER="e2e-$(date +%s)-$$"
@@ -77,6 +82,8 @@ remote_build() {
 # does not matter; `|| true` keeps a missing marker from tripping `set -e`.
 mark_ts() { grep -aE -m1 "@@ $1 $2 " "$3" 2>/dev/null | grep -oE -m1 '[0-9-]{10}T[0-9:]{8}Z' || true; }
 epoch() { date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$1" +%s 2>/dev/null || date -u -d "$1" +%s; }
+# Run a command with a time limit (portable: macOS has no `timeout`).
+with_timeout() { local secs="$1"; shift; perl -e 'alarm shift; exec @ARGV' "$secs" "$@"; }
 
 ########################################################################
 log "1/8 Building and loading images"
@@ -87,7 +94,14 @@ done
 
 log "2/8 Creating Kind cluster '$CLUSTER'"
 kind delete cluster --name "$CLUSTER" >/dev/null 2>&1 || true
-kind create cluster --name "$CLUSTER" --config "${REPO_ROOT}/test/e2e/kind-config.yaml" >/dev/null
+if [ "$HA" = "1" ]; then
+  KIND_CONFIG="${REPO_ROOT}/test/e2e/kind-config-ha.yaml"
+  MANIFESTS="${REPO_ROOT}/test/e2e/manifests-ha"
+else
+  KIND_CONFIG="${REPO_ROOT}/test/e2e/kind-config.yaml"
+  MANIFESTS="${REPO_ROOT}/test/e2e/manifests"
+fi
+kind create cluster --name "$CLUSTER" --config "$KIND_CONFIG" >/dev/null
 export KUBECONFIG="${WORK}/kubeconfig"
 kind get kubeconfig --name "$CLUSTER" > "$KUBECONFIG"
 kubectl wait --for=condition=Ready nodes --all --timeout=120s >/dev/null
@@ -111,9 +125,23 @@ kubectl create secret generic nix-builder-ssh-keys -n "$NS" \
   --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
 log "4/8 Deploying controller and proxy"
-kubectl apply -k "${REPO_ROOT}/test/e2e/manifests" >/dev/null
+kubectl apply -k "$MANIFESTS" >/dev/null
 kubectl -n "$NS" rollout status deploy/controller --timeout=120s
 kubectl -n "$NS" rollout status deploy/proxy --timeout=120s
+
+# The pod holding the controller's leader lease (empty if none).
+leader_pod() {
+  kubectl -n "$NS" get lease "$LEASE" -o jsonpath='{.spec.holderIdentity}' 2>/dev/null | sed 's/_.*//'
+}
+if [ "$HA" = "1" ]; then
+  for i in $(seq 1 60); do
+    LEADER="$(leader_pod)"
+    [ -n "$LEADER" ] && break
+    [ "$i" = 60 ] && fail "no controller replica acquired the leader lease"
+    sleep 1
+  done
+  info "PASS: controller leader is ${LEADER}"
+fi
 
 log "5/8 Port-forwarding proxy to localhost:${PROXY_PORT}"
 kubectl -n "$NS" port-forward svc/proxy "${PROXY_PORT}:22" >/dev/null 2>&1 &
@@ -139,6 +167,20 @@ export NIX_SSHOPTS="-F ${WORK}/ssh_config"
 # Sanity: one plain SSH session reaches a builder pod and can run nix.
 ssh -F "${WORK}/ssh_config" nrbc-proxy "nix-store --version" >/dev/null 2>&1 ||
   fail "could not run nix-store on a builder pod through the proxy"
+
+# Flow control: the builder writes a large stdout before reading any stdin while
+# the client streams a large stdin. Both directions must keep moving; a proxy
+# that lets one stalled direction block the other deadlocks here.
+STREAM_BYTES=$((32 * 1024 * 1024))
+STREAM_ERR="${WORK}/stream.err"
+stream_out="$(head -c "$STREAM_BYTES" /dev/zero |
+  with_timeout 180 ssh -F "${WORK}/ssh_config" nrbc-proxy \
+    "head -c $STREAM_BYTES /dev/zero; wc -c >&2" 2> "$STREAM_ERR" | wc -c | tr -d ' ')" ||
+  fail "bidirectional stream through the proxy failed or deadlocked"
+stream_in="$(tr -dc '0-9' < "$STREAM_ERR")"
+[ "$stream_out" = "$STREAM_BYTES" ] && [ "$stream_in" = "$STREAM_BYTES" ] ||
+  fail "bidirectional stream lost data (stdout=${stream_out} stdin=${stream_in}, want ${STREAM_BYTES})"
+info "PASS: ${STREAM_BYTES} bytes streamed each way concurrently"
 
 ########################################################################
 log "6/8 Building the DAG while watching builder pods"
@@ -196,6 +238,19 @@ sessions=$(jq -rs '[.[].pods[]] | unique | length' "$POD_EVENTS")
 [ "${max_pods:-0}" -ge 2 ] || fail "expected >=2 concurrent builder pods, saw ${max_pods:-0}"
 [ "${sessions:-0}" -ge 3 ] || fail "expected >=3 distinct sessions, saw ${sessions:-0}"
 info "PASS: peak ${max_pods} builder pods across ${sessions} sessions"
+
+# Leader failover: delete the leader; the standby must take the lease and keep
+# reconciling (the failing build below needs a working controller).
+if [ "$HA" = "1" ]; then
+  kubectl -n "$NS" delete pod "$LEADER" --wait=false >/dev/null
+  for i in $(seq 1 90); do
+    NEW_LEADER="$(leader_pod)"
+    [ -n "$NEW_LEADER" ] && [ "$NEW_LEADER" != "$LEADER" ] && break
+    [ "$i" = 90 ] && fail "standby controller did not take over the leader lease"
+    sleep 1
+  done
+  info "PASS: leadership moved from ${LEADER} to ${NEW_LEADER}"
+fi
 
 # Failure behavior: a failing derivation fails the client build.
 remote_build failing "${WORK}/fail.log" && fail "failing derivation unexpectedly succeeded"
