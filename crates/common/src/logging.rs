@@ -26,12 +26,7 @@ pub fn parse_level(level: &str) -> Result<LevelFilter, String> {
 pub fn init(level: LevelFilter) {
     let filter = match std::env::var("RUST_LOG") {
         Ok(spec) if !spec.trim().is_empty() => EnvFilter::new(spec),
-        _ => {
-            let deps = level.min(LevelFilter::WARN);
-            EnvFilter::new(format!(
-                "{deps},nix_remote_build_controller={level},controller={level},proxy={level}"
-            ))
-        }
+        _ => default_filter(level),
     };
     let _ = tracing_subscriber::fmt()
         .json()
@@ -43,6 +38,20 @@ pub fn init(level: LevelFilter) {
         .with_writer(std::io::stderr)
         .try_init();
 }
+
+/// Logs this workspace's crates at `level` and everything else at warn or
+/// below.
+fn default_filter(level: LevelFilter) -> EnvFilter {
+    let deps = level.min(LevelFilter::WARN);
+    let ours = WORKSPACE_CRATES
+        .iter()
+        .map(|krate| format!(",{krate}={level}"))
+        .collect::<String>();
+    EnvFilter::new(format!("{deps}{ours}"))
+}
+
+/// The crates of this workspace, as tracing targets.
+const WORKSPACE_CRATES: [&str; 4] = ["api", "common", "controller", "proxy"];
 
 #[cfg(test)]
 mod tests {
@@ -81,6 +90,38 @@ mod tests {
         fn make_writer(&'a self) -> Self::Writer {
             self.clone()
         }
+    }
+
+    #[test]
+    fn default_filter_logs_every_workspace_crate() {
+        let buf = Buffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(default_filter(LevelFilter::INFO))
+            .with_writer(buf.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(target: "api::controller_client", "from api");
+            tracing::info!(target: "common::http", "from common");
+            tracing::info!(target: "controller::runner", "from controller");
+            tracing::info!(target: "proxy::server", "from proxy");
+            tracing::info!(target: "kube_client::client", "from kube");
+            tracing::warn!(target: "kube_client::client", "kube warning");
+        });
+        let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        for krate in WORKSPACE_CRATES {
+            assert!(
+                out.contains(&format!("from {krate}")),
+                "{krate} info is logged: {out}"
+            );
+        }
+        assert!(
+            !out.contains("from kube"),
+            "dependency info is hidden: {out}"
+        );
+        assert!(
+            out.contains("kube warning"),
+            "dependency warnings are logged: {out}"
+        );
     }
 
     /// Context spans must survive a warn-only filter, or warnings lose the
