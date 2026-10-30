@@ -5,7 +5,6 @@ use std::collections::HashSet;
 use std::io;
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -35,6 +34,8 @@ use crate::{lock, secret};
 /// How long to wait for sessions after they were force-cancelled at the end of
 /// the drain window.
 const FORCED_SHUTDOWN_WAIT: Duration = Duration::from_secs(15);
+/// While draining, how often a connection checks whether it has become idle.
+const IDLE_CHECK_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Accepts SSH connections from Nix clients and routes every session channel
 /// to a dynamically provisioned builder pod.
@@ -47,7 +48,8 @@ pub struct SshProxy {
     ssh_config: Arc<server::Config>,
     client_auth: Option<ClientAuthorizer>,
     health: tokio::sync::Mutex<Option<HttpServer>>,
-    shutting_down: Arc<AtomicBool>,
+    /// Cancelled when shutdown starts: no new sessions, idle connections close.
+    draining: CancellationToken,
     sessions: Arc<Mutex<HashSet<String>>>,
 }
 
@@ -103,11 +105,11 @@ impl SshProxy {
 
         let listener = crate::http::bind(&cfg.listen_addr).await?;
         let local_addr = listener.local_addr()?;
-        let shutting_down = Arc::new(AtomicBool::new(false));
+        let draining = CancellationToken::new();
         let health = if cfg.health_addr.is_empty() {
             None
         } else {
-            Some(start_health_server(&cfg.health_addr, Arc::clone(&shutting_down)).await?)
+            Some(start_health_server(&cfg.health_addr, draining.clone()).await?)
         };
 
         info!(
@@ -134,7 +136,7 @@ impl SshProxy {
             ssh_config: Arc::new(ssh_config),
             client_auth,
             health: tokio::sync::Mutex::new(health),
-            shutting_down,
+            draining,
             sessions: Arc::new(Mutex::new(HashSet::new())),
         }))
     }
@@ -306,7 +308,7 @@ impl SshProxy {
             }
         }
 
-        self.shutting_down.store(true, Ordering::SeqCst);
+        self.draining.cancel();
         drop(listener);
         self.drain(&connections, &force).await;
         if let Some(health) = self.health.lock().await.take() {
@@ -315,8 +317,9 @@ impl SshProxy {
         result
     }
 
-    /// Waits for in-flight connections to finish, up to the shutdown timeout,
-    /// then force-cancels any that remain. The listener must already be
+    /// Waits for running builds to finish, up to the shutdown timeout, then
+    /// force-cancels any that remain. Connections without a running build
+    /// close on their own once draining starts. The listener must already be
     /// closed.
     async fn drain(&self, connections: &TaskTracker, force: &CancellationToken) {
         info!(
@@ -411,6 +414,12 @@ impl SshProxy {
                     warn!("SSH handshake failed: timed out");
                     return;
                 }
+                () = self.draining.cancelled() => {
+                    conn_token.cancel();
+                    let _ = (&mut running).await;
+                    debug!("Closed connection during shutdown before login");
+                    return;
+                }
             };
             let Some(auth) = auth else {
                 // The handler was dropped without authenticating: the session
@@ -428,11 +437,28 @@ impl SshProxy {
                 "New SSH connection"
             );
 
-            let ended = (&mut running).await;
-            if let Err(err) = ended
-                && !conn_token.is_cancelled()
-            {
-                debug!(error = %err, "SSH connection ended with an error");
+            // During shutdown a connection without a running build is closed,
+            // so idle connections (an SSH ControlMaster, for example) do not
+            // hold up the drain.
+            let idle_while_draining = async {
+                self.draining.cancelled().await;
+                while !channels.is_empty() {
+                    tokio::time::sleep(IDLE_CHECK_INTERVAL).await;
+                }
+            };
+            tokio::select! {
+                ended = &mut running => {
+                    if let Err(err) = ended
+                        && !conn_token.is_cancelled()
+                    {
+                        debug!(error = %err, "SSH connection ended with an error");
+                    }
+                }
+                () = idle_while_draining => {
+                    info!("Closing idle connection during shutdown");
+                    conn_token.cancel();
+                    let _ = (&mut running).await;
+                }
             }
             conn_token.cancel();
             channels.close();
@@ -625,6 +651,13 @@ impl server::Handler for ConnHandler {
         reply: server::ChannelOpenHandle,
         session: &mut server::Session,
     ) -> Result<(), Self::Error> {
+        if self.proxy.draining.is_cancelled() {
+            warn!(conn_id = %self.conn_id, "Rejecting session: proxy is shutting down");
+            reply
+                .reject(ChannelOpenFailure::AdministrativelyProhibited)
+                .await;
+            return Ok(());
+        }
         let build = Session::new();
         let Some(guard) = self.proxy.track_session(&build.id) else {
             warn!(
@@ -747,7 +780,7 @@ impl server::Handler for ConnHandler {
 
 async fn start_health_server(
     addr: &str,
-    shutting_down: Arc<AtomicBool>,
+    draining: CancellationToken,
 ) -> anyhow::Result<HttpServer> {
     let listener = crate::http::bind(addr)
         .await
@@ -762,9 +795,9 @@ async fn start_health_server(
         .route(
             "/readyz",
             axum::routing::get(move || {
-                let shutting_down = Arc::clone(&shutting_down);
+                let draining = draining.clone();
                 async move {
-                    if shutting_down.load(Ordering::SeqCst) {
+                    if draining.is_cancelled() {
                         (StatusCode::SERVICE_UNAVAILABLE, "shutting down")
                     } else {
                         (StatusCode::OK, "ready")

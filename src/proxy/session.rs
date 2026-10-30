@@ -28,6 +28,8 @@ pub const ANNOTATION_PROXY_POD: &str = "nix.io/proxy-pod";
 /// from the session's cancellation, because deleting the request is what makes
 /// the controller remove the builder pod.
 const FINALIZE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Pause between attempts to delete a request.
+const DELETE_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
 /// The API operations the proxy performs on `NixBuildRequest`s.
 #[async_trait]
@@ -301,20 +303,26 @@ impl SshProxy {
                     warn!(error = %err, "Failed to record final NixBuildRequest status");
                 }
             }
-            match self.kube.delete(namespace, &name).await {
-                Err(err) if !is_not_found(&err) => error!(
-                    error = %err,
-                    "Failed to delete NixBuildRequest; the controller will reap it after its TTL"
-                ),
-                _ => info!(phase = %phase, "NixBuildRequest finalized and deleted"),
+            // Retry until the time limit: a request that is not deleted keeps
+            // its builder pod until the build timeout ends it.
+            loop {
+                match self.kube.delete(namespace, &name).await {
+                    Err(err) if !is_not_found(&err) => {
+                        warn!(error = %err, "Failed to delete NixBuildRequest, retrying");
+                        tokio::time::sleep(DELETE_RETRY_INTERVAL).await;
+                    }
+                    _ => break,
+                }
             }
+            info!(phase = %phase, "NixBuildRequest finalized and deleted");
         };
         if tokio::time::timeout(FINALIZE_TIMEOUT, finalize)
             .await
             .is_err()
         {
             error!(
-                "Timed out finalizing NixBuildRequest; the controller will reap it after its TTL"
+                "Could not delete NixBuildRequest; the controller removes it and its pod when \
+                 the build timeout ends"
             );
         }
     }

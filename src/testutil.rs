@@ -27,6 +27,8 @@ struct State {
     next_version: u64,
     /// When set, the next pod create fails with this (code, reason, message).
     fail_next_pod_create: Option<(u16, String, String)>,
+    /// Number of upcoming request deletes that fail with a server error.
+    failing_request_deletes: u32,
 }
 
 impl State {
@@ -171,6 +173,11 @@ impl FakeKube {
         self.state().fail_next_pod_create = Some((code, reason.to_string(), message.to_string()));
     }
 
+    /// Makes the next `count` request deletes fail with a server error.
+    pub fn fail_next_request_deletes(&self, count: u32) {
+        self.state().failing_request_deletes = count;
+    }
+
     pub fn events(&self) -> Vec<BuildEvent> {
         self.state().events.clone()
     }
@@ -178,6 +185,10 @@ impl FakeKube {
     /// Deletes a request; finalizers hold it back with a deletion timestamp.
     fn delete_request_object(&self, namespace: &str, name: &str) -> kube::Result<()> {
         let mut state = self.state();
+        if state.failing_request_deletes > 0 {
+            state.failing_request_deletes -= 1;
+            return Err(api_error(503, "ServiceUnavailable", "the server is busy"));
+        }
         let k = key(namespace, name);
         let version = state.bump();
         let stored = state

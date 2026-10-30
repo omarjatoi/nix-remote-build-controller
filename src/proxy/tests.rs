@@ -822,6 +822,18 @@ async fn lost_builder_connection_is_reported_to_client() {
 }
 
 #[tokio::test]
+async fn failed_deletes_are_retried() {
+    let mut h = Harness::new(HarnessOpts::default()).await;
+    h.fake.fail_next_request_deletes(2);
+    let client = h.dial().await;
+    let out = run_command(&client, "echo-upper", "x").await;
+    assert_eq!(out.exit_status, Some(0));
+    drop(client);
+    h.wait_no_requests().await;
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn controller_failure_is_reported_to_client() {
     let mut h = Harness::new(HarnessOpts {
         mode: ControllerMode::Failed,
@@ -1295,13 +1307,60 @@ async fn shutdown_drains_in_flight_sessions_and_refuses_new_connections() {
     assert_eq!(status, Some(0));
     assert_eq!(stdout, b"DRAINING");
     drop(channel);
-    client
+    // The proxy may already have closed the now idle connection.
+    let _ = client
         .disconnect(russh::Disconnect::ByApplication, "done", "")
-        .await
-        .unwrap();
+        .await;
     drop(client);
 
     h.stop().await.expect("clean shutdown");
+}
+
+/// An idle connection (an SSH ControlMaster, for example) must not hold up the
+/// shutdown until the drain timeout.
+#[tokio::test]
+async fn shutdown_closes_idle_connections_promptly() {
+    let mut h = Harness::new(HarnessOpts::default()).await;
+    let client = h.dial().await;
+    let out = run_command(&client, "echo-upper", "done").await;
+    assert_eq!(out.stdout, "DONE");
+    h.wait_no_requests().await;
+
+    let start = Instant::now();
+    h.stop().await.expect("clean shutdown");
+    assert!(
+        start.elapsed() < Duration::from_secs(3),
+        "shutdown waited {:?} for an idle connection (drain timeout 10s)",
+        start.elapsed()
+    );
+    drop(client);
+}
+
+#[tokio::test]
+async fn new_sessions_are_rejected_while_draining() {
+    let mut h = Harness::new(HarnessOpts::default()).await;
+    let client = h.dial().await;
+    let first = client.channel_open_session().await.unwrap();
+    first.exec(true, "hang").await.unwrap();
+    wait_until("the builder session", Duration::from_secs(5), || {
+        h.builder.stats.running.load(Ordering::SeqCst) == 1
+    })
+    .await;
+
+    // The running build keeps the drain going; new builds must not start.
+    h.shutdown.cancel();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    match client.channel_open_session().await {
+        Ok(_) => panic!("a new session was accepted during shutdown"),
+        Err(russh::Error::ChannelOpenFailure(ChannelOpenFailure::AdministrativelyProhibited)) => {}
+        Err(err) => panic!("unexpected rejection error: {err:?}"),
+    }
+    assert_eq!(h.proxy.session_count(), 1, "the running build continues");
+
+    drop(first);
+    drop(client);
+    h.stop().await.expect("clean shutdown");
+    h.wait_no_requests().await;
 }
 
 #[tokio::test]
