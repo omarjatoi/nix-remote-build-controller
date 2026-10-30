@@ -6,15 +6,21 @@
 //! - `proxy`: the SSH front door. Every SSH session channel opened by
 //!   a Nix client becomes its own [`api::NixBuildRequest`] and builder pod, and
 //!   the channel is spliced onto an SSH session on that pod.
-//! - `controller`: reconciles `NixBuildRequest`s into
+//! - `controller` ([`controller`]): reconciles `NixBuildRequest`s into
 //!   short-lived builder pods and reaps them afterwards.
 
 pub mod api;
+pub mod controller;
 pub mod duration;
 pub mod http;
 pub mod kube_util;
 pub mod logging;
 pub mod secret;
+
+#[cfg(test)]
+pub(crate) mod testutil;
+
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
@@ -51,6 +57,12 @@ pub fn shutdown_token() -> CancellationToken {
         cancel.cancel();
     });
     token
+}
+
+/// Locks a mutex, ignoring poisoning: every critical section in this crate
+/// leaves its data consistent even if it panics part-way.
+pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Resolves once SIGINT or SIGTERM is received.

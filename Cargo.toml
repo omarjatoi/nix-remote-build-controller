@@ -11,6 +11,10 @@ publish = false
 [lib]
 path = "src/lib.rs"
 
+[[bin]]
+name = "controller"
+path = "src/bin/controller.rs"
+
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"
