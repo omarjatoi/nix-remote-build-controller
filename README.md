@@ -162,7 +162,7 @@ To see the builds, run `kubectl get nixbuildrequests -w` and
 | `--pod-ready-timeout` | `5m` | Time to wait for a builder pod before the build fails |
 | `--build-timeout` | `1h` | Maximum life of a builder pod |
 | `--shutdown-timeout` | `30m` | After SIGTERM, time that running builds can continue |
-| `--keepalive-interval` | `30s` | SSH keepalive interval (`0` turns keepalives off) |
+| `--keepalive-interval` | `30s` | Keepalive interval for client and builder connections (`0` turns keepalives off) |
 | `--max-sessions` | `0` | Maximum number of builds at the same time (`0` means no limit) |
 | `--log-level` | `info` | `trace`, `debug`, `info`, `warn`, `error` or `off` |
 

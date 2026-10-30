@@ -33,8 +33,8 @@ pub struct Config {
     /// Bounds the TCP+SSH handshake with a builder pod, including retries
     /// while its sshd is still starting.
     pub builder_dial_timeout: Duration,
-    /// Interval of SSH keepalive requests sent to both the client and the
-    /// builder. Zero disables keepalives.
+    /// Keepalive interval: TCP keepalives towards clients, SSH keepalive
+    /// requests towards builders. Zero disables keepalives.
     pub keepalive_interval: Duration,
     /// How often the `NixBuildRequest` status is polled while waiting for the
     /// builder pod.

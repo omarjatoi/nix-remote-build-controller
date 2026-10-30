@@ -83,19 +83,19 @@ impl SshProxy {
             auth_rejection_time: Duration::ZERO,
             auth_rejection_time_initial: Some(Duration::ZERO),
             keys: vec![host_key],
-            // Builds can be silent for a long time; liveness comes from
-            // keepalives, not from traffic.
+            // Builds can be silent for a long time, so idle connections stay
+            // open. Dead clients are found with TCP keepalives instead (see
+            // `set_tcp_keepalive`).
             inactivity_timeout: None,
-            keepalive_interval: keepalive,
-            // Like OpenSSH's ServerAliveCountMax=1: the connection is dead if
-            // a keepalive goes unanswered for a full interval.
-            keepalive_max: 1,
+            keepalive_interval: None,
             nodelay: true,
             ..Default::default()
         };
         let builder_ssh_config = russh::client::Config {
             inactivity_timeout: None,
             keepalive_interval: keepalive,
+            // The connection is dead if a keepalive goes unanswered for a
+            // full interval.
             keepalive_max: 1,
             nodelay: true,
             ..Default::default()
@@ -352,6 +352,11 @@ impl SshProxy {
         let span = error_span!("conn", conn_id = %conn_id, client_addr = %peer);
         async move {
             let _ = tcp.set_nodelay(true);
+            if !self.cfg.keepalive_interval.is_zero()
+                && let Err(err) = set_tcp_keepalive(&tcp, self.cfg.keepalive_interval)
+            {
+                debug!(error = %err, "Failed to enable TCP keepalives");
+            }
             // Cancelled when the client goes away or the proxy is force-shut
             // down; every session on this connection watches it, and it closes
             // the transport underneath russh.
@@ -424,14 +429,10 @@ impl SshProxy {
             );
 
             let ended = (&mut running).await;
-            match ended {
-                Err(russh::Error::KeepaliveTimeout) => {
-                    warn!("Client keepalive failed, closing connection");
-                }
-                Err(err) if !conn_token.is_cancelled() => {
-                    debug!(error = %err, "SSH connection ended with an error");
-                }
-                _ => {}
+            if let Err(err) = ended
+                && !conn_token.is_cancelled()
+            {
+                debug!(error = %err, "SSH connection ended with an error");
             }
             conn_token.cancel();
             channels.close();
@@ -772,6 +773,22 @@ async fn start_health_server(
             }),
         );
     HttpServer::spawn("Health", listener, router)
+}
+
+/// Finds dead clients with TCP keepalives: a probe after `interval` without
+/// traffic, then one more after another `interval`.
+///
+/// SSH keepalive requests are not used towards clients: russh sends them from
+/// the start of the connection, and SSH clients (OpenSSH, russh) end the
+/// connection when one arrives before authentication is complete. A client
+/// that waits for a passphrase or a security key would be disconnected.
+fn set_tcp_keepalive(tcp: &TcpStream, interval: Duration) -> io::Result<()> {
+    // Some platforms count in whole seconds.
+    let interval = interval.max(Duration::from_secs(1));
+    let keepalive = socket2::TcpKeepalive::new().with_time(interval);
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let keepalive = keepalive.with_interval(interval).with_retries(1);
+    socket2::SockRef::from(tcp).set_tcp_keepalive(&keepalive)
 }
 
 /// Accept errors that concern only the connection being accepted.

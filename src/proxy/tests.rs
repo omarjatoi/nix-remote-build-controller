@@ -1117,6 +1117,31 @@ async fn client_public_key_authentication() {
     h.stop().await.unwrap();
 }
 
+/// A client may take longer to log in than the keepalive interval (waiting
+/// for a passphrase or a security key, for example). Nothing may interrupt
+/// it: SSH clients end the connection on unexpected messages during login.
+#[tokio::test]
+async fn slow_login_is_not_interrupted_by_keepalives() {
+    let mut h = Harness::new(HarnessOpts::default()).await;
+    let config = Arc::new(client::Config {
+        inactivity_timeout: None,
+        ..Default::default()
+    });
+    let mut handle = client::connect(config, h.proxy.local_addr(), TestClient)
+        .await
+        .unwrap();
+    // Several keepalive intervals (200ms in the harness).
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    let key = PrivateKeyWithHashAlg::new(Arc::new(h.client_key.clone()), None);
+    let auth = handle.authenticate_publickey("nixbld", key).await.unwrap();
+    assert!(auth.success());
+    let out = run_command(&handle, "echo-upper", "slow").await;
+    assert_eq!(out.stdout, "SLOW");
+    drop(handle);
+    h.wait_no_requests().await;
+    h.stop().await.unwrap();
+}
+
 #[tokio::test]
 async fn anonymous_clients_are_accepted_without_client_auth() {
     let mut h = Harness::new(HarnessOpts::default()).await;

@@ -72,7 +72,7 @@ struct Cli {
     #[arg(long, default_value = "30m", value_parser = parse_duration)]
     shutdown_timeout: Duration,
 
-    /// SSH keepalive interval towards clients and builders (0 disables)
+    /// Keepalive interval for client and builder connections (0 disables)
     #[arg(long, default_value = "30s", value_parser = parse_duration)]
     keepalive_interval: Duration,
 
