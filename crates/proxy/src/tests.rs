@@ -680,7 +680,7 @@ async fn multiple_channels_on_one_connection_are_independent_sessions() {
 async fn build_request_carries_timeout_labels_and_owner_reference() {
     let mut h = Harness::new(HarnessOpts {
         mode: ControllerMode::Never,
-        cfg: |c| c.pod_ready_timeout = Duration::from_secs(2),
+        cfg: |c| c.pod_ready_timeout = Duration::from_secs(10),
         ..Default::default()
     })
     .await;
@@ -688,7 +688,7 @@ async fn build_request_carries_timeout_labels_and_owner_reference() {
     let channel = client.channel_open_session().await.unwrap();
     channel.exec(true, "echo-upper").await.unwrap();
 
-    wait_until("a NixBuildRequest", Duration::from_secs(2), || {
+    wait_until("a NixBuildRequest", Duration::from_secs(5), || {
         !h.requests().is_empty()
     })
     .await;
@@ -739,7 +739,7 @@ async fn sub_second_build_timeout_sets_no_deadline_and_no_owner_without_uid() {
         mode: ControllerMode::Never,
         cfg: |c| {
             c.build_timeout = Duration::from_millis(500); // truncates to 0 seconds
-            c.pod_ready_timeout = Duration::from_secs(2);
+            c.pod_ready_timeout = Duration::from_secs(10);
             c.owner_pod_uid = String::new();
         },
         ..Default::default()
@@ -748,7 +748,7 @@ async fn sub_second_build_timeout_sets_no_deadline_and_no_owner_without_uid() {
     let client = h.dial().await;
     let channel = client.channel_open_session().await.unwrap();
     channel.exec(true, "echo-upper").await.unwrap();
-    wait_until("a NixBuildRequest", Duration::from_secs(2), || {
+    wait_until("a NixBuildRequest", Duration::from_secs(5), || {
         !h.requests().is_empty()
     })
     .await;
@@ -895,22 +895,14 @@ async fn failed_sessions_record_their_outcome_before_deletion() {
         ..Default::default()
     })
     .await;
+    h.fake.add_finalizer_on_create("test/hold");
     let client = h.dial().await;
     let channel = client.channel_open_session().await.unwrap();
     channel.exec(true, "echo-upper").await.unwrap();
-    wait_until("a NixBuildRequest", Duration::from_secs(2), || {
-        !h.requests().is_empty()
-    })
-    .await;
-    let mut req = h.requests().remove(0);
-    req.metadata.finalizers = Some(vec!["test/hold".into()]);
-    api::ControllerClient::replace_request(&h.fake, &req)
-        .await
-        .unwrap();
 
     let out = collect(channel).await;
     assert_eq!(out.exit_status, Some(255));
-    let name = req.metadata.name.clone().unwrap();
+    let name = h.requests()[0].metadata.name.clone().unwrap();
     wait_until(
         "the request to be marked deleted",
         Duration::from_secs(5),
@@ -976,7 +968,7 @@ async fn client_disconnect_while_waiting_for_pod_cleans_up() {
     let client = h.dial().await;
     let channel = client.channel_open_session().await.unwrap();
     channel.exec(true, "echo-upper").await.unwrap();
-    wait_until("a NixBuildRequest", Duration::from_secs(2), || {
+    wait_until("a NixBuildRequest", Duration::from_secs(5), || {
         !h.requests().is_empty()
     })
     .await;

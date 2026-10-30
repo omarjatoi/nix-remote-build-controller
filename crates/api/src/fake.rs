@@ -29,6 +29,8 @@ struct State {
     fail_next_pod_create: Option<(u16, String, String)>,
     /// Number of upcoming request deletes that fail with a server error.
     failing_request_deletes: u32,
+    /// Finalizer added to every request created from now on.
+    create_finalizer: Option<String>,
 }
 
 impl State {
@@ -177,6 +179,12 @@ impl FakeKube {
     /// Makes the next pod create fail with an API error.
     pub fn fail_next_pod_create(&self, code: u16, reason: &str, message: &str) {
         self.state().fail_next_pod_create = Some((code, reason.to_string(), message.to_string()));
+    }
+
+    /// Adds `finalizer` to every request created from now on, like an
+    /// admission webhook, so deleted requests stay around for inspection.
+    pub fn add_finalizer_on_create(&self, finalizer: &str) {
+        self.state().create_finalizer = Some(finalizer.to_string());
     }
 
     /// Makes the next `count` request deletes fail with a server error.
@@ -333,6 +341,9 @@ impl BuildRequestClient for FakeKube {
         created.metadata.creation_timestamp = Some(crate::now());
         // The status subresource is not writable on create.
         created.status = None;
+        if let Some(finalizer) = state.create_finalizer.clone() {
+            created.finalizers_mut().push(finalizer);
+        }
         state.requests.insert(k, created);
         Ok(())
     }
