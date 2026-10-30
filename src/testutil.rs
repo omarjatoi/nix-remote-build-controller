@@ -15,6 +15,7 @@ use kube::ResourceExt;
 use crate::api::{self, NixBuildRequest, NixBuildRequestStatus};
 use crate::controller::{BuildEvent, ControllerClient};
 use crate::kube_util::api_error;
+use crate::proxy::BuildRequestClient;
 
 type Key = (String, String);
 
@@ -65,6 +66,26 @@ fn already_exists(kind: &str, name: &str) -> kube::Error {
     )
 }
 
+/// RFC 7386 JSON merge patch.
+fn merge_patch(target: &mut serde_json::Value, patch: &serde_json::Value) {
+    match patch {
+        serde_json::Value::Object(fields) => {
+            if !target.is_object() {
+                *target = serde_json::Value::Object(Default::default());
+            }
+            let obj = target.as_object_mut().expect("object");
+            for (k, v) in fields {
+                if v.is_null() {
+                    obj.remove(k);
+                } else {
+                    merge_patch(obj.entry(k.clone()).or_insert(serde_json::Value::Null), v);
+                }
+            }
+        }
+        other => *target = other.clone(),
+    }
+}
+
 impl FakeKube {
     pub fn new() -> Self {
         Self::default()
@@ -99,6 +120,15 @@ impl FakeKube {
 
     pub fn request(&self, namespace: &str, name: &str) -> Option<NixBuildRequest> {
         self.state().requests.get(&key(namespace, name)).cloned()
+    }
+
+    pub fn requests(&self, namespace: &str) -> Vec<NixBuildRequest> {
+        self.state()
+            .requests
+            .iter()
+            .filter(|((ns, _), _)| ns == namespace)
+            .map(|(_, r)| r.clone())
+            .collect()
     }
 
     pub fn pod(&self, namespace: &str, name: &str) -> Option<Pod> {
@@ -264,5 +294,57 @@ impl ControllerClient for FakeKube {
 
     fn publish_event(&self, _req: &NixBuildRequest, event: BuildEvent) {
         self.state().events.push(event);
+    }
+}
+
+#[async_trait]
+impl BuildRequestClient for FakeKube {
+    async fn create(&self, req: &NixBuildRequest) -> kube::Result<()> {
+        let mut state = self.state();
+        let k = key(&req.namespace().unwrap_or_default(), &req.name_any());
+        if state.requests.contains_key(&k) {
+            return Err(already_exists("nixbuildrequests.nix.io", &req.name_any()));
+        }
+        let mut created = req.clone();
+        created.metadata.resource_version = Some(state.bump());
+        created.metadata.uid = Some(format!("uid-{}", req.name_any()));
+        created.metadata.creation_timestamp = Some(api::now());
+        // The status subresource is not writable on create.
+        created.status = None;
+        state.requests.insert(k, created);
+        Ok(())
+    }
+
+    async fn get(&self, namespace: &str, name: &str) -> kube::Result<NixBuildRequest> {
+        self.request(namespace, name)
+            .ok_or_else(|| not_found("nixbuildrequests.nix.io", name))
+    }
+
+    async fn patch_status(
+        &self,
+        namespace: &str,
+        name: &str,
+        patch: &serde_json::Value,
+    ) -> kube::Result<()> {
+        let mut state = self.state();
+        let version = state.bump();
+        let stored = state
+            .requests
+            .get_mut(&key(namespace, name))
+            .ok_or_else(|| not_found("nixbuildrequests.nix.io", name))?;
+        let mut status = serde_json::to_value(stored.status.clone().unwrap_or_default())
+            .expect("status serializes");
+        if let Some(status_patch) = patch.get("status") {
+            merge_patch(&mut status, status_patch);
+        }
+        stored.status = Some(
+            serde_json::from_value(status).map_err(|e| api_error(422, "Invalid", e.to_string()))?,
+        );
+        stored.metadata.resource_version = Some(version);
+        Ok(())
+    }
+
+    async fn delete(&self, namespace: &str, name: &str) -> kube::Result<()> {
+        self.delete_request_object(namespace, name)
     }
 }

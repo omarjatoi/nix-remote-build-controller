@@ -3,7 +3,7 @@
 //!
 //! The crate builds two binaries:
 //!
-//! - `proxy`: the SSH front door. Every SSH session channel opened by
+//! - `proxy` ([`proxy`]): the SSH front door. Every SSH session channel opened by
 //!   a Nix client becomes its own [`api::NixBuildRequest`] and builder pod, and
 //!   the channel is spliced onto an SSH session on that pod.
 //! - `controller` ([`controller`]): reconciles `NixBuildRequest`s into
@@ -15,6 +15,7 @@ pub mod duration;
 pub mod http;
 pub mod kube_util;
 pub mod logging;
+pub mod proxy;
 pub mod secret;
 
 #[cfg(test)]

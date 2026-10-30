@@ -15,6 +15,10 @@ path = "src/lib.rs"
 name = "controller"
 path = "src/bin/controller.rs"
 
+[[bin]]
+name = "proxy"
+path = "src/bin/proxy.rs"
+
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"
