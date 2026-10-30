@@ -595,6 +595,23 @@ async fn existing_pod_is_adopted() {
 }
 
 #[tokio::test]
+async fn invalid_pod_fails_the_request() {
+    let fake = FakeKube::new();
+    fake.insert_request(with_finalizer(new_request("bad")));
+    let r = reconciler(&fake);
+    fake.fail_next_pod_create(422, "Invalid", "metadata.name: Invalid value");
+
+    reconcile(&r, &fake, "build-bad").await;
+    let st = status(&fake, "build-bad");
+    assert_eq!(st.phase, Some(BuildPhase::Failed), "retrying cannot help");
+    assert!(
+        st.message.starts_with("Builder pod is invalid: "),
+        "message = {}",
+        st.message
+    );
+}
+
+#[tokio::test]
 async fn pod_create_failure_is_reported_and_retried() {
     let fake = FakeKube::new();
     fake.insert_request(with_finalizer(new_request("quota")));
@@ -619,6 +636,25 @@ async fn pod_create_failure_is_reported_and_retried() {
         fake.events()
             .iter()
             .any(|e| e.reason == "PodCreateFailed" && e.type_ == EventType::Warning)
+    );
+
+    // The same failure again does not write the status again: that write
+    // would trigger another reconcile and bypass the retry backoff.
+    let version = fake
+        .request(NS, "build-quota")
+        .unwrap()
+        .metadata
+        .resource_version;
+    fake.fail_next_pod_create(403, "Forbidden", "exceeded quota: pods");
+    let req = fake.request(NS, "build-quota").unwrap();
+    let err = r.reconcile(&req).await.expect_err("still failing");
+    assert!(err.to_string().contains("exceeded quota"), "error = {err}");
+    assert_eq!(
+        fake.request(NS, "build-quota")
+            .unwrap()
+            .metadata
+            .resource_version,
+        version
     );
 
     // The retry succeeds once the API accepts the pod.

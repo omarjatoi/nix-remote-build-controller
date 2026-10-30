@@ -24,6 +24,12 @@ pub fn is_already_exists(err: &kube::Error) -> bool {
     status(err).is_some_and(|s| s.is_already_exists())
 }
 
+/// The API server rejected the object as invalid (HTTP 422). Sending the same
+/// object again cannot succeed.
+pub fn is_invalid(err: &kube::Error) -> bool {
+    status(err).is_some_and(|s| s.is_invalid())
+}
+
 /// Builds an API error, as the API server would return it. Used by the
 /// in-memory fake API in tests.
 #[cfg(any(test, feature = "testing"))]
@@ -44,8 +50,10 @@ mod tests {
         let not_found = new(404, "NotFound", "gone");
         let conflict = new(409, "Conflict", "stale");
         let exists = new(409, "AlreadyExists", "exists");
+        let invalid = new(422, "Invalid", "bad name");
         assert!(is_not_found(&not_found) && !is_conflict(&not_found));
         assert!(is_conflict(&conflict) && !is_already_exists(&conflict));
         assert!(is_already_exists(&exists) && !is_conflict(&exists));
+        assert!(is_invalid(&invalid) && !is_invalid(&conflict));
     }
 }

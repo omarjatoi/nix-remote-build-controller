@@ -193,6 +193,11 @@ impl<C: ControllerClient> Reconciler<C> {
             Err(err) if kube_error::is_already_exists(&err) => {
                 info!(pod = %pod_name, "Builder pod already exists, adopting it");
             }
+            Err(err) if kube_error::is_invalid(&err) => {
+                // The pod is built from the request, so retrying cannot help.
+                let message = format!("Builder pod is invalid: {err}");
+                return self.fail(req, "PodInvalid", &message).await;
+            }
             Err(err) => {
                 self.event(
                     req,
@@ -203,10 +208,15 @@ impl<C: ControllerClient> Reconciler<C> {
                 );
                 // Surface the reason to the proxy without failing yet; API
                 // errors are usually transient (quota, admission webhooks).
-                let mut updated = req.clone();
-                status_mut(&mut updated).message = format!("Failed to create builder pod: {err}");
-                self.update_status(&updated, ReconcileAction::AwaitChange)
-                    .await?;
+                // An unchanged message is not written again: the write would
+                // trigger another reconcile and bypass the retry backoff.
+                let message = format!("Failed to create builder pod: {err}");
+                if status_message(req) != message {
+                    let mut updated = req.clone();
+                    status_mut(&mut updated).message = message;
+                    self.update_status(&updated, ReconcileAction::AwaitChange)
+                        .await?;
+                }
                 return Err(ReconcileError::new("create builder pod", err));
             }
         }
@@ -278,19 +288,14 @@ impl<C: ControllerClient> Reconciler<C> {
         }
 
         // Still starting: surface scheduling / image pull problems to the proxy logs.
-        if let Some(message) = pod_pending_reason(&pod) {
-            let current = req
-                .status
-                .as_ref()
-                .map(|s| s.message.as_str())
-                .unwrap_or_default();
-            if message != current {
-                let mut updated = req.clone();
-                status_mut(&mut updated).message = message;
-                return self
-                    .update_status(&updated, ReconcileAction::Requeue(REQUEUE_CREATING))
-                    .await;
-            }
+        if let Some(message) = pod_pending_reason(&pod)
+            && message != status_message(req)
+        {
+            let mut updated = req.clone();
+            status_mut(&mut updated).message = message;
+            return self
+                .update_status(&updated, ReconcileAction::Requeue(REQUEUE_CREATING))
+                .await;
         }
         Ok(ReconcileAction::Requeue(REQUEUE_CREATING))
     }
@@ -607,6 +612,13 @@ fn has_finalizer(req: &NixBuildRequest) -> bool {
 fn status_mut(req: &mut NixBuildRequest) -> &mut NixBuildRequestStatus {
     req.status
         .get_or_insert_with(NixBuildRequestStatus::default)
+}
+
+fn status_message(req: &NixBuildRequest) -> &str {
+    req.status
+        .as_ref()
+        .map(|s| s.message.as_str())
+        .unwrap_or_default()
 }
 
 fn is_empty_map<V>(map: Option<&BTreeMap<String, V>>) -> bool {
