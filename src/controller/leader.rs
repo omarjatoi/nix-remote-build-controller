@@ -111,21 +111,19 @@ impl LeaderElector {
         }
     }
 
-    /// Renews the lease every retry period until `cancel` fires (`Ok`) or the
-    /// lease cannot be renewed within the renew deadline (`Err`).
-    pub async fn hold(&self, cancel: &CancellationToken) -> Result<(), LeadershipLost> {
+    /// Renews the lease every retry period. Returns only when leadership is
+    /// lost: the lease was taken, or could not be renewed within the renew
+    /// deadline. Drop the future to stop renewing.
+    pub async fn hold(&self) -> LeadershipLost {
         let mut last_renewed = Instant::now();
         loop {
-            tokio::select! {
-                () = cancel.cancelled() => return Ok(()),
-                () = tokio::time::sleep(self.cfg.retry_period) => {}
-            }
+            tokio::time::sleep(self.cfg.retry_period).await;
             let attempt =
                 tokio::time::timeout(self.cfg.renew_deadline, self.try_acquire_or_renew()).await;
             match attempt {
                 Ok(Ok(Attempt::Held)) => last_renewed = Instant::now(),
                 Ok(Ok(Attempt::HeldByOther)) => {
-                    return Err(LeadershipLost("lease was taken by another replica".into()));
+                    return LeadershipLost("lease was taken by another replica".into());
                 }
                 // Retried until the renew deadline.
                 Ok(Ok(Attempt::Conflict)) => {
@@ -135,10 +133,10 @@ impl LeaderElector {
                 Err(_) => warn!("Timed out renewing leader lease"),
             }
             if last_renewed.elapsed() > self.cfg.renew_deadline {
-                return Err(LeadershipLost(format!(
+                return LeadershipLost(format!(
                     "lease not renewed within {}",
                     crate::duration::format(self.cfg.renew_deadline)
-                )));
+                ));
             }
         }
     }
@@ -404,20 +402,16 @@ mod tests {
         assert_eq!(server.holder().as_deref(), Some("a"));
 
         // A renews; B stays a standby well past the lease duration.
-        let stop_a = CancellationToken::new();
         let holding = {
-            let (a, stop_a) = (Arc::clone(&a), stop_a.clone());
-            tokio::spawn(async move { a.hold(&stop_a).await })
+            let a = Arc::clone(&a);
+            tokio::spawn(async move { a.hold().await })
         };
         assert!(!acquire_within(&b, Duration::from_millis(900)).await);
         assert_eq!(server.holder().as_deref(), Some("a"));
+        assert!(!holding.is_finished(), "A still holds the lease");
 
         // A stops renewing without releasing: B takes over once it expires.
-        stop_a.cancel();
-        holding
-            .await
-            .unwrap()
-            .expect("A held the lease until told to stop");
+        holding.abort();
         let start = Instant::now();
         assert!(acquire_within(&b, Duration::from_secs(3)).await);
         assert!(
@@ -443,10 +437,10 @@ mod tests {
         let a = elector(&server, "a");
         assert!(acquire_within(&a, Duration::from_secs(2)).await);
         server.set_holder("intruder");
-        let lost = tokio::time::timeout(Duration::from_secs(2), a.hold(&CancellationToken::new()))
+        let lost = tokio::time::timeout(Duration::from_secs(2), a.hold())
             .await
-            .expect("hold returns");
-        assert!(lost.is_err());
+            .expect("hold returns when the lease is taken");
+        assert!(lost.to_string().contains("taken by another replica"));
         // A release by a non-holder leaves the lease alone.
         a.release().await;
         assert_eq!(server.holder().as_deref(), Some("intruder"));

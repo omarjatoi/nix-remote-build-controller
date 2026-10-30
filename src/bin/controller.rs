@@ -228,9 +228,11 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     result
 }
 
-/// Waits for leadership, then reconciles until shutdown or until leadership is
-/// lost, whichever comes first. Losing leadership is an error, so the process
-/// exits and restarts as a standby.
+/// Waits for leadership, then reconciles until shutdown. The lease is renewed
+/// for as long as reconciling runs, including the drain after a shutdown
+/// signal, and released at the end. If leadership is lost, reconciling stops at
+/// once, without draining, so it never overlaps with the new leader; the error
+/// makes the process exit and restart as a standby.
 async fn run_as_leader(
     runner: Runner,
     elector: LeaderElector,
@@ -239,20 +241,10 @@ async fn run_as_leader(
     if !elector.acquire(shutdown).await {
         return Ok(());
     }
-    let elector = Arc::new(elector);
-    let stop = shutdown.child_token();
-    let holder = {
-        let elector = Arc::clone(&elector);
-        let stop = stop.clone();
-        tokio::spawn(async move {
-            let held = elector.hold(&stop).await;
-            stop.cancel();
-            held
-        })
-    };
-    runner.run(stop.clone()).await;
-    stop.cancel();
-    holder.await.context("leader election task")??;
+    tokio::select! {
+        lost = elector.hold() => return Err(lost.into()),
+        () = runner.run(shutdown.clone()) => {}
+    }
     elector.release().await;
     Ok(())
 }
