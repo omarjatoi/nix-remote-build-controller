@@ -837,4 +837,17 @@ mod tests {
         assert!(!is_per_connection_accept_error(&fatal) && !is_resource_exhaustion(&fatal));
         assert_eq!(short_id().len(), 12);
     }
+
+    #[tokio::test]
+    async fn enables_tcp_keepalive() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let tcp = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        // Sub-second intervals are raised to one second, not rejected.
+        set_tcp_keepalive(&tcp, Duration::from_millis(200)).unwrap();
+        let socket = socket2::SockRef::from(&tcp);
+        assert!(socket.keepalive().unwrap());
+        assert_eq!(socket.tcp_keepalive_time().unwrap(), Duration::from_secs(1));
+    }
 }
