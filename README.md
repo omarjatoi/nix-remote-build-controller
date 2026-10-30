@@ -163,7 +163,8 @@ changes the dependency build time, `PROXY_LOCAL_PORT` changes the forwarded port
 ## Validation
 
 ```sh
-make fmt-check vet lint race build   # Go checks
+make fmt-check lint test build       # cargo fmt, clippy, tests, release build
+make check                           # the same checks in the Nix sandbox (nix flake check)
 make validate                        # kustomize build | kubeconform
 make images                          # build the three container images
 make e2e                             # full Kind end-to-end test
@@ -186,12 +187,13 @@ readiness check, so a session starts as soon as the builder answers rather than
 after a probe period plus a kubelet status round-trip. The probe is still set on
 the pod, but only so `kubectl get pods` reports something meaningful.
 
-Components:
+Components (the proxy and controller are two binaries of one Rust crate,
+`Cargo.toml` and `src/`):
 
-- SSH proxy (`cmd/proxy`, `pkg/proxy`): authenticates clients by public key, turns
+- SSH proxy (`src/bin/proxy.rs`, `src/proxy/`): authenticates clients by public key, turns
   every session channel into an independent build session, and runs a
   cancellation-aware bidirectional tunnel with keepalives.
-- Controller (`cmd/controller`, `pkg/controller`): a controller-runtime reconciler
+- Controller (`src/bin/controller.rs`, `src/controller/`): a kube-runtime reconciler
   that renders builder pods, owns them by owner reference, and reconciles many
   requests in parallel.
 - Builder image (`flake.nix`): a minimal image running single-user Nix under
@@ -239,7 +241,7 @@ status:
 | `--shutdown-timeout` | `30m` | Drain window for in-flight sessions on SIGTERM |
 | `--keepalive-interval` | `30s` | SSH keepalives (`0` disables) |
 | `--max-sessions` | `0` | Concurrent session cap (`0` is unlimited) |
-| `--log-level` | `info` | Log level |
+| `--log-level` | `info` | Log level (`RUST_LOG`, if set, overrides it) |
 
 ### Controller flags
 
