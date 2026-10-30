@@ -1,10 +1,10 @@
-//! Splices a client's session channel onto a session on a builder pod.
+//! Forwards a client's SSH session to a session on a builder pod.
 
 use std::collections::VecDeque;
 use std::future::Future;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -13,6 +13,7 @@ use bytes::Bytes;
 use russh::keys::{PrivateKey, PrivateKeyWithHashAlg, PublicKey, PublicKeyOrCertificate};
 use russh::{Channel, ChannelId, ChannelMsg, ChannelReadHalf, ChannelWriteHalf, client, server};
 use tokio::net::TcpStream;
+use tokio::sync::{Notify, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -132,9 +133,9 @@ impl ClientWriter {
 }
 
 impl SshProxy {
-    /// Splices the client's session channel onto a new session on the builder
-    /// pod and returns once the builder-side command has exited (or the
-    /// client went away).
+    /// Forwards the client's session to a new session on the builder pod.
+    /// Returns when the command on the builder has exited or the client has
+    /// gone.
     ///
     /// Ordering matters for correctness:
     /// - Channel requests from the client (env, exec) are forwarded in the
@@ -143,7 +144,7 @@ impl SshProxy {
     ///   never sees data for a command that has not been started yet.
     /// - The client channel is closed only after the builder's output and
     ///   exit status have been forwarded, so Nix sees the real exit code.
-    /// - Client disconnects cancel the tunnel, which severs the builder
+    /// - Client disconnects cancel the tunnel, which closes the builder
     ///   connection and therefore kills the remote nix-store process.
     pub(crate) async fn route_to_builder(
         &self,
@@ -196,16 +197,53 @@ impl SshProxy {
     }
 }
 
-/// State shared by the two tunnel directions.
+/// Client input that may wait in the proxy for the builder to read it.
+///
+/// russh grants the client more send window as soon as data arrives, not when
+/// it is consumed. Real flow control towards the client therefore only happens
+/// when the proxy stops reading the client channel, and that also stops all
+/// other traffic on the client's connection, including the builder's output.
+/// If the builder is busy writing output and not reading input, stopping would
+/// deadlock both directions. So:
+///
+/// - Up to `INPUT_SOFT_LIMIT` is buffered; beyond that the proxy stops reading
+///   and the client is slowed down (a builder with a slow disk, for example).
+/// - While output to the client is in progress, reading continues up to
+///   `INPUT_HARD_LIMIT`, so the output can always drain.
+/// - Beyond `INPUT_HARD_LIMIT` with output still in progress, the session
+///   fails instead of hanging. Nix never sends large input while the builder
+///   writes output, so only abnormal sessions reach this.
+const INPUT_SOFT_LIMIT: usize = 4 << 20;
+const INPUT_HARD_LIMIT: usize = 128 << 20;
+
+/// State shared by the tunnel tasks.
 struct Shared {
     tunnel: CancellationToken,
     exit_status: Mutex<Option<u32>>,
     copy_err: Mutex<Option<anyhow::Error>>,
     /// Kinds of the forwarded requests still awaiting the builder's reply.
     expected_replies: Mutex<VecDeque<&'static str>>,
+    /// Client input read but not yet written to the builder, in bytes.
+    input_buffered: AtomicUsize,
+    /// Set while output is being written to the client.
+    output_busy: AtomicBool,
+    /// Wakes the client reader when either of the above changes.
+    input_room: Notify,
 }
 
 impl Shared {
+    fn new(tunnel: CancellationToken) -> Self {
+        Self {
+            tunnel,
+            exit_status: Mutex::new(None),
+            copy_err: Mutex::new(None),
+            expected_replies: Mutex::new(VecDeque::new()),
+            input_buffered: AtomicUsize::new(0),
+            output_busy: AtomicBool::new(false),
+            input_room: Notify::new(),
+        }
+    }
+
     fn record_copy_err(&self, direction: &str, err: russh::Error) {
         if self.tunnel.is_cancelled() {
             return;
@@ -215,6 +253,54 @@ impl Shared {
             *slot = Some(anyhow!("{direction}: {err}"));
         }
     }
+
+    /// Waits until more client input may be read. `false` means the input
+    /// limit was reached while output is in progress (see `INPUT_HARD_LIMIT`).
+    async fn wait_for_input_room(&self) -> bool {
+        loop {
+            let room = self.input_room.notified();
+            tokio::pin!(room);
+            // Register for wake-ups before checking, so none is missed.
+            room.as_mut().enable();
+            let buffered = self.input_buffered.load(Ordering::SeqCst);
+            if buffered < INPUT_SOFT_LIMIT {
+                return true;
+            }
+            if self.output_busy.load(Ordering::SeqCst) {
+                return buffered < INPUT_HARD_LIMIT;
+            }
+            room.await;
+        }
+    }
+
+    fn input_read(&self, msg: &ChannelMsg) {
+        if let ChannelMsg::Data { data } = msg {
+            self.input_buffered.fetch_add(data.len(), Ordering::SeqCst);
+        }
+    }
+
+    fn input_written(&self, len: usize) {
+        self.input_buffered.fetch_sub(len, Ordering::SeqCst);
+        self.input_room.notify_waiters();
+    }
+
+    /// Runs one write to the client, marked as output in progress.
+    async fn write_output<T>(&self, write: impl Future<Output = T>) -> T {
+        self.output_busy.store(true, Ordering::SeqCst);
+        self.input_room.notify_waiters();
+        let result = write.await;
+        self.output_busy.store(false, Ordering::SeqCst);
+        result
+    }
+}
+
+/// How the client side of a tunnel ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClientEnd {
+    /// The client closed its channel or its connection.
+    Closed,
+    /// The client sent more input than the builder read (`INPUT_HARD_LIMIT`).
+    InputOverflow,
 }
 
 /// How the builder side of a tunnel ended.
@@ -241,25 +327,23 @@ async fn tunnel_session(
         ..
     } = client;
     let (builder_read, builder_write) = builder.split();
-    let shared = Arc::new(Shared {
-        tunnel: tunnel.clone(),
-        exit_status: Mutex::new(None),
-        copy_err: Mutex::new(None),
-        expected_replies: Mutex::new(VecDeque::new()),
-    });
+    let shared = Arc::new(Shared::new(tunnel.clone()));
+    let (input_tx, input_rx) = mpsc::unbounded_channel();
 
-    let mut to_builder: JoinHandle<()> = tokio::spawn(client_to_builder(
+    let mut from_client: JoinHandle<ClientEnd> = tokio::spawn(read_client(
         client_read,
         pending,
-        builder_write,
+        input_tx,
         Arc::clone(&shared),
     ));
+    let to_builder: JoinHandle<()> =
+        tokio::spawn(write_builder(input_rx, builder_write, Arc::clone(&shared)));
     let mut to_client: JoinHandle<BuilderEnd> = tokio::spawn(builder_to_client(
         builder_read,
         Arc::clone(&writer),
         Arc::clone(&shared),
     ));
-    let mut to_builder_done = false;
+    let mut from_client_done = false;
     let mut to_client_done = false;
 
     // Wait for the session to end.
@@ -273,24 +357,34 @@ async fn tunnel_session(
             to_client_done = true;
             builder_end = Some(end);
         }
-        _ = &mut to_builder => {
-            // The client closed its channel: EOF has been propagated to the
-            // builder; give the remote command a moment to exit on its own.
-            to_builder_done = true;
-            tokio::select! {
-                biased;
-                end = &mut to_client => {
-                    to_client_done = true;
-                    builder_end = Some(end);
-                }
-                () = tunnel.cancelled() => err = Some(anyhow!("session cancelled")),
-                () = tokio::time::sleep(client_close_grace) => {
-                    warn!(
-                        grace = %fmt_duration(client_close_grace),
-                        "Builder did not exit after client closed the session; forcing teardown"
+        end = &mut from_client => {
+            from_client_done = true;
+            match end {
+                Ok(ClientEnd::InputOverflow) => {
+                    let overflow = anyhow!(
+                        "client sent more than {} MiB of input that the builder did not read",
+                        INPUT_HARD_LIMIT >> 20
                     );
-                    err = Some(anyhow!("client closed the session before the builder finished"));
+                    writer.fail(&overflow.to_string()).await;
+                    err = Some(overflow);
                 }
+                // The client closed its channel: EOF has been propagated to
+                // the builder; give the remote command a moment to exit.
+                _ => tokio::select! {
+                    biased;
+                    end = &mut to_client => {
+                        to_client_done = true;
+                        builder_end = Some(end);
+                    }
+                    () = tunnel.cancelled() => err = Some(anyhow!("session cancelled")),
+                    () = tokio::time::sleep(client_close_grace) => {
+                        warn!(
+                            grace = %fmt_duration(client_close_grace),
+                            "Builder did not exit after client closed the session; forcing teardown"
+                        );
+                        err = Some(anyhow!("client closed the session before the builder finished"));
+                    }
+                },
             }
         }
         () = tunnel.cancelled() => err = Some(anyhow!("session cancelled")),
@@ -317,14 +411,16 @@ async fn tunnel_session(
     }
 
     writer.close().await;
-    // Severs the builder connection and unblocks both directions.
+    // Severs the builder connection and unblocks every task.
     tunnel.cancel();
+    from_client.abort();
     to_builder.abort();
     to_client.abort();
     let finish = async {
-        if !to_builder_done {
-            let _ = (&mut to_builder).await;
+        if !from_client_done {
+            let _ = (&mut from_client).await;
         }
+        let _ = to_builder.await;
         if !to_client_done {
             let _ = (&mut to_client).await;
         }
@@ -348,45 +444,63 @@ async fn tunnel_session(
     SessionResult { exit_status, err }
 }
 
+/// Reads the client channel and queues everything for [`write_builder`],
+/// within the input limits. Returns when the client closes its channel or its
+/// connection goes away; dropping the queue then tells the writer.
+async fn read_client(
+    mut read: ChannelReadHalf,
+    pending: VecDeque<ChannelMsg>,
+    queue: mpsc::UnboundedSender<ChannelMsg>,
+    shared: Arc<Shared>,
+) -> ClientEnd {
+    for msg in pending {
+        shared.input_read(&msg);
+        if queue.send(msg).is_err() {
+            return ClientEnd::Closed;
+        }
+    }
+    loop {
+        if !shared.wait_for_input_room().await {
+            return ClientEnd::InputOverflow;
+        }
+        let msg = match read.wait().await {
+            None | Some(ChannelMsg::Close) => return ClientEnd::Closed,
+            Some(msg) => msg,
+        };
+        shared.input_read(&msg);
+        if queue.send(msg).is_err() {
+            return ClientEnd::Closed;
+        }
+    }
+}
+
 /// Stdin received before the remote command was started.
 enum HeldInput {
     Data(Bytes),
     Eof,
 }
 
-/// Forwards requests and stdin from the client to the builder. Returns when
-/// the client closes its channel or its connection goes away; in either case
-/// the builder gets EOF on stdin so the remote command can finish on its own.
-///
-/// Stdin is written with the builder's flow control: while the builder is not
-/// reading, this task waits, the client channel's buffer in russh fills, and
-/// the client is slowed down in turn.
-async fn client_to_builder(
-    mut read: ChannelReadHalf,
-    pending: VecDeque<ChannelMsg>,
+/// Forwards the client's requests and stdin to the builder, in order. Stdin
+/// waits until the exec/shell/subsystem request has been sent. When the client
+/// is gone the builder gets EOF on stdin, so the remote command can finish on
+/// its own.
+async fn write_builder(
+    mut queue: mpsc::UnboundedReceiver<ChannelMsg>,
     builder: ChannelWriteHalf<client::Msg>,
     shared: Arc<Shared>,
 ) {
-    let mut pending = pending.into_iter();
     let mut started = false;
     let mut held: Vec<HeldInput> = Vec::new();
     let mut broken = false;
     let mut eof_sent = false;
     let mut stdin_bytes: u64 = 0;
 
-    loop {
-        let msg = match pending.next() {
-            Some(msg) => msg,
-            None => match read.wait().await {
-                Some(msg) => msg,
-                None => break,
-            },
-        };
-        if matches!(msg, ChannelMsg::Close) {
-            break;
-        }
+    while let Some(msg) = queue.recv().await {
         if broken {
-            // The builder side failed; keep draining until the client closes.
+            // The builder side failed; discard input until the client is gone.
+            if let ChannelMsg::Data { data } = &msg {
+                shared.input_written(data.len());
+            }
             continue;
         }
 
@@ -396,10 +510,13 @@ async fn client_to_builder(
                 | ChannelMsg::RequestShell { .. }
                 | ChannelMsg::RequestSubsystem { .. }
         );
-        let result = match msg {
+        let mut result = match msg {
             ChannelMsg::Data { data } if started => {
-                stdin_bytes += data.len() as u64;
-                builder.data_bytes(data).await
+                let len = data.len();
+                stdin_bytes += len as u64;
+                let sent = builder.data_bytes(data).await;
+                shared.input_written(len);
+                sent
             }
             ChannelMsg::Data { data } => {
                 held.push(HeldInput::Data(data));
@@ -469,14 +586,16 @@ async fn client_to_builder(
             }
         };
 
-        let mut result = result;
         if result.is_ok() && starts_command && !started {
             started = true;
             for input in held.drain(..) {
                 result = match input {
                     HeldInput::Data(data) => {
-                        stdin_bytes += data.len() as u64;
-                        builder.data_bytes(data).await
+                        let len = data.len();
+                        stdin_bytes += len as u64;
+                        let sent = builder.data_bytes(data).await;
+                        shared.input_written(len);
+                        sent
                     }
                     HeldInput::Eof => {
                         debug!(bytes = stdin_bytes, "client->builder stdin copy finished");
@@ -492,6 +611,12 @@ async fn client_to_builder(
         if let Err(err) = result {
             shared.record_copy_err("client->builder", err);
             broken = true;
+            // Held input will never be sent; release its share of the limit.
+            for input in held.drain(..) {
+                if let HeldInput::Data(data) = input {
+                    shared.input_written(data.len());
+                }
+            }
         }
     }
 
@@ -546,11 +671,13 @@ async fn builder_to_client(
             _ if broken => Ok(()),
             ChannelMsg::Data { data } => {
                 stdout_bytes += data.len() as u64;
-                client.write.data_bytes(data).await
+                shared.write_output(client.write.data_bytes(data)).await
             }
             ChannelMsg::ExtendedData { data, ext } => {
                 stderr_bytes += data.len() as u64;
-                client.write.extended_data_bytes(ext, data).await
+                shared
+                    .write_output(client.write.extended_data_bytes(ext, data))
+                    .await
             }
             ChannelMsg::Eof => client.write.eof().await,
             ChannelMsg::ExitSignal {
@@ -719,7 +846,7 @@ pub(crate) async fn dial_builder(
 }
 
 /// One TCP + SSH handshake + authentication attempt, bounded by `timeout`.
-/// The connection's transport is severed when `cancel` fires, or right away if
+/// The connection is closed when `cancel` fires, or right away if
 /// the attempt fails, so an abandoned handshake cannot linger.
 async fn dial_once(
     addr: SocketAddr,
@@ -774,4 +901,84 @@ async fn dial_once(
         guard.disarm();
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    fn shared_with_input(bytes: usize) -> Arc<Shared> {
+        let shared = Arc::new(Shared::new(CancellationToken::new()));
+        shared.input_buffered.store(bytes, Ordering::SeqCst);
+        shared
+    }
+
+    async fn has_room_now(shared: &Shared) -> Option<bool> {
+        tokio::time::timeout(Duration::from_millis(50), shared.wait_for_input_room())
+            .await
+            .ok()
+    }
+
+    #[tokio::test]
+    async fn input_below_soft_limit_is_read() {
+        let shared = shared_with_input(INPUT_SOFT_LIMIT - 1);
+        assert_eq!(has_room_now(&shared).await, Some(true));
+    }
+
+    #[tokio::test]
+    async fn input_waits_at_soft_limit_until_the_builder_reads() {
+        let shared = shared_with_input(INPUT_SOFT_LIMIT);
+        assert_eq!(
+            has_room_now(&shared).await,
+            None,
+            "must wait while output is idle"
+        );
+
+        let waiter = {
+            let shared = Arc::clone(&shared);
+            tokio::spawn(async move { shared.wait_for_input_room().await })
+        };
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        shared.input_written(1);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), waiter)
+                .await
+                .unwrap()
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn input_keeps_flowing_while_output_is_written() {
+        let shared = shared_with_input(INPUT_SOFT_LIMIT);
+        let waiter = {
+            let shared = Arc::clone(&shared);
+            tokio::spawn(async move { shared.wait_for_input_room().await })
+        };
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        // Output that cannot complete yet keeps the reader going.
+        let output = {
+            let shared = Arc::clone(&shared);
+            tokio::spawn(async move { shared.write_output(std::future::pending::<()>()).await })
+        };
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), waiter)
+                .await
+                .unwrap()
+                .unwrap()
+        );
+        output.abort();
+    }
+
+    #[tokio::test]
+    async fn input_overflow_during_output_is_reported() {
+        let shared = shared_with_input(INPUT_HARD_LIMIT);
+        shared.output_busy.store(true, Ordering::SeqCst);
+        assert_eq!(has_room_now(&shared).await, Some(false));
+        // Without output in progress the reader just waits for the builder.
+        shared.output_busy.store(false, Ordering::SeqCst);
+        assert_eq!(has_room_now(&shared).await, None);
+    }
 }
