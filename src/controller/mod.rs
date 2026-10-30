@@ -1,10 +1,10 @@
-//! Reconciles `NixBuildRequest` objects into builder pods.
+//! Creates and deletes builder pods for `NixBuildRequest` objects.
 //!
-//! Each `NixBuildRequest` corresponds to exactly one SSH build session and one
-//! builder pod. Reconciliation is stateless and non-blocking: every step reads
-//! the current state, performs at most one API write and requeues. Multiple
-//! requests are therefore reconciled concurrently up to the configured number
-//! of workers, and a controller restart resumes from the persisted status.
+//! Each `NixBuildRequest` belongs to one SSH build session and has one builder
+//! pod. Each reconcile step reads the current state, makes at most one change
+//! and then returns, so many requests can be processed at the same time. All
+//! state is in the request status, so a restarted controller continues where
+//! the old one stopped.
 
 mod client;
 mod config;

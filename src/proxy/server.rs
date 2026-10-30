@@ -353,7 +353,7 @@ impl SshProxy {
         async move {
             let _ = tcp.set_nodelay(true);
             // Cancelled when the client goes away or the proxy is force-shut
-            // down; every session on this connection watches it, and it severs
+            // down; every session on this connection watches it, and it closes
             // the transport underneath russh.
             let conn_token = force.child_token();
             let stream = CancellableStream::new(tcp, conn_token.clone());

@@ -1,5 +1,4 @@
-//! SSH proxy that routes Nix build sessions to dynamically provisioned
-//! Kubernetes builder pods.
+//! The SSH proxy: forwards each Nix build session to its own builder pod.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -13,11 +12,10 @@ use nix_remote_build_controller::{VERSION, error_chain, logging, shutdown_token}
 use tracing::info;
 use tracing::level_filters::LevelFilter;
 
-/// SSH proxy server for Nix remote builders.
+/// SSH proxy for Nix remote builders.
 ///
-/// An SSH proxy that routes Nix build sessions to dynamically provisioned
-/// Kubernetes builder pods. Every SSH session channel becomes an independent
-/// NixBuildRequest and builder pod, so concurrent Nix builds run in parallel.
+/// Forwards each Nix build session to its own Kubernetes builder pod, so
+/// builds run in parallel.
 #[derive(Parser, Debug)]
 #[command(name = "proxy", args_conflicts_with_subcommands = true)]
 struct Cli {

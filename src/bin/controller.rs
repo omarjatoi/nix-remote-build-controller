@@ -1,5 +1,4 @@
-//! Kubernetes controller that turns NixBuildRequests into dedicated,
-//! short-lived Nix builder pods.
+//! The controller: creates a builder pod for each NixBuildRequest.
 
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -26,8 +25,7 @@ const REPORTER_NAME: &str = "nix-remote-build-controller";
 
 /// Kubernetes controller for Nix remote builders.
 ///
-/// A Kubernetes controller that turns NixBuildRequests into dedicated,
-/// short-lived Nix builder pods.
+/// Creates a short-lived Nix builder pod for each NixBuildRequest.
 #[derive(Parser, Debug)]
 #[command(
     name = "controller",

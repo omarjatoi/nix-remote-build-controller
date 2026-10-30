@@ -1,13 +1,10 @@
-//! Kubernetes controller and SSH proxy that turn a cluster into an elastic pool
-//! of Nix remote builders.
+//! Nix remote builds on Kubernetes. The crate builds two programs:
 //!
-//! The crate builds two binaries:
-//!
-//! - `proxy` ([`proxy`]): the SSH front door. Every SSH session channel opened by
-//!   a Nix client becomes its own [`api::NixBuildRequest`] and builder pod, and
-//!   the channel is spliced onto an SSH session on that pod.
-//! - `controller` ([`controller`]): reconciles `NixBuildRequest`s into
-//!   short-lived builder pods and reaps them afterwards.
+//! - `proxy` ([`proxy`]): the SSH server that Nix clients connect to. Each SSH
+//!   session gets its own [`api::NixBuildRequest`] and builder pod, and the
+//!   proxy forwards the session to that pod.
+//! - `controller` ([`controller`]): creates a builder pod for each
+//!   `NixBuildRequest` and deletes it when the request is done.
 
 pub mod api;
 pub mod controller;

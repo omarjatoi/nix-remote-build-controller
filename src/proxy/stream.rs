@@ -1,4 +1,4 @@
-//! A byte stream that can be severed from outside.
+//! A byte stream that another task can close.
 
 use std::future::Future;
 use std::io;
@@ -8,10 +8,10 @@ use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
 
-/// Wraps a transport so that cancelling a token fails every pending and future
-/// read and write. russh runs each SSH connection on its own task that owns the
-/// transport; handing it this wrapper is how the proxy closes a connection at
-/// any point, including mid-handshake, without cooperation from that task.
+/// Wraps a stream so that cancelling a token fails all current and later reads
+/// and writes. russh runs each SSH connection in its own task, which owns the
+/// stream. With this wrapper the proxy can close a connection at any time,
+/// also during the handshake.
 pub struct CancellableStream<S> {
     inner: S,
     cancelled: Pin<Box<WaitForCancellationFutureOwned>>,
@@ -19,7 +19,7 @@ pub struct CancellableStream<S> {
 }
 
 impl<S> CancellableStream<S> {
-    /// Wraps `inner`; `token` severs it.
+    /// Wraps `inner`; cancelling `token` closes it.
     pub fn new(inner: S, token: CancellationToken) -> Self {
         Self {
             inner,

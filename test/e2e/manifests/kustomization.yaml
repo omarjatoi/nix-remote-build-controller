@@ -1,15 +1,12 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
-# Overlay for the Kind-based end-to-end test. Images are built locally and loaded
-# into the Kind node with `kind load`, so pods must never try to pull them, and
-# the proxy is reached with kubectl port-forward instead of a LoadBalancer.
+# Changes for the end-to-end test on Kind. The images are loaded into Kind, so
+# pods must not pull them. The test reaches the proxy with a port-forward.
 resources:
   - ../../../deploy
 
-# The base kustomization already renames the bare "controller"/"proxy"/"builder"
-# names to their full ghcr paths with tag "latest"; match those full names here
-# to retag them to "e2e" (the tag we load into Kind).
+# Use the "e2e" tag, which the test loads into Kind.
 images:
   - name: ghcr.io/omarjatoi/nix-remote-build-controller/controller
     newTag: e2e

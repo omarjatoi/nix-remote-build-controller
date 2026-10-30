@@ -1,19 +1,10 @@
-//! The SSH front door for Nix remote builds.
+//! The SSH server that Nix clients connect to.
 //!
-//! A Nix client configured with a builder such as
-//!
-//! ```text
-//! ssh://nixbld@<proxy> x86_64-linux - 100 1
-//! ```
-//!
-//! runs one build-remote hook per derivation it wants built remotely. Each
-//! hook opens its own SSH connection (or, with ControlMaster, its own channel
-//! on a shared connection) and executes `nix-store --serve --write`. The proxy
-//! treats every session channel as an independent build session: it creates a
-//! `NixBuildRequest`, waits for the controller to bring up a dedicated builder
-//! pod and then splices the channel onto an SSH session on that pod. Sessions
-//! never wait on each other, so independent derivations build concurrently as
-//! long as the client advertises enough remote slots (the "100" above).
+//! For each remote build, a Nix client opens an SSH session and runs
+//! `nix-store --serve --write`. The proxy handles every session on its own: it
+//! creates a `NixBuildRequest`, waits until the controller has started a
+//! builder pod, and forwards the session to that pod. Sessions do not wait for
+//! each other, so independent builds run at the same time.
 
 mod auth;
 mod config;
