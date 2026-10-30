@@ -254,6 +254,7 @@ images and runs real `nix build` commands through the proxy. It checks that:
 - a build starts only after its dependencies finish,
 - the result gets back to the client,
 - a large data stream works in both directions at the same time,
+- a build that hangs is cleaned up after the client leaves,
 - a failed build fails on the client,
 - all pods and requests are deleted at the end.
 

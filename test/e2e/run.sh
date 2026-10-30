@@ -82,6 +82,8 @@ remote_build() {
 # does not matter; `|| true` keeps a missing marker from tripping `set -e`.
 mark_ts() { grep -aE -m1 "@@ $1 $2 " "$3" 2>/dev/null | grep -oE -m1 '[0-9-]{10}T[0-9:]{8}Z' || true; }
 epoch() { date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$1" +%s 2>/dev/null || date -u -d "$1" +%s; }
+# Number of objects of a kind (with optional selectors).
+count() { kubectl -n "$NS" get "$@" --no-headers 2>/dev/null | wc -l | tr -d ' '; }
 # Run a command with a time limit (portable: macOS has no `timeout`).
 with_timeout() { local secs="$1"; shift; perl -e 'alarm shift; exec @ARGV' "$secs" "$@"; }
 
@@ -182,6 +184,17 @@ stream_in="$(tr -dc '0-9' < "$STREAM_ERR")"
   fail "bidirectional stream lost data (stdout=${stream_out} stdin=${stream_in}, want ${STREAM_BYTES})"
 info "PASS: ${STREAM_BYTES} bytes streamed each way concurrently"
 
+# Hung build: the remote command never reads its input. After the client
+# leaves, the proxy must still end the session and remove the builder pod.
+head -c "$STREAM_BYTES" /dev/zero |
+  with_timeout 20 ssh -F "${WORK}/ssh_config" nrbc-proxy "sleep 600" >/dev/null 2>&1 || true
+for i in $(seq 1 60); do
+  [ "$(count pods -l app=nix-builder)" = "0" ] && [ "$(count nixbuildrequests)" = "0" ] && break
+  [ "$i" = 60 ] && fail "session with a hung build was not cleaned up after the client left"
+  sleep 3
+done
+info "PASS: hung build cleaned up after the client left"
+
 ########################################################################
 log "6/8 Building the DAG while watching builder pods"
 POD_EVENTS="${WORK}/pods.jsonl"
@@ -261,7 +274,6 @@ log "8/8 Verifying cleanup"
 kill "$PF_PID" 2>/dev/null || true
 PF_PID=""
 deadline=$(( $(date +%s) + 120 ))
-count() { kubectl -n "$NS" get "$@" --no-headers 2>/dev/null | wc -l | tr -d ' '; }
 while :; do
   pods=$(count pods -l app=nix-builder); reqs=$(count nixbuildrequests)
   [ "$pods" = "0" ] && [ "$reqs" = "0" ] && break
