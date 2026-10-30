@@ -61,7 +61,6 @@ pub const DEFAULT_POD_READY_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 pub const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 pub const DEFAULT_BUILDER_DIAL_TIMEOUT: Duration = Duration::from_secs(15);
-pub const DEFAULT_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 pub const DEFAULT_CLIENT_CLOSE_GRACE: Duration = Duration::from_secs(30);
 pub const DEFAULT_INPUT_STALL_TIMEOUT: Duration = Duration::from_secs(60);

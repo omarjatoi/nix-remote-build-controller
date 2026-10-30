@@ -252,21 +252,26 @@ impl Runner {
         let pod_selector = format!("{LABEL_APP}={LABEL_APP_VALUE}");
 
         let stop = shutdown.clone();
+        let failures = Arc::clone(&ctx);
         let controller = Controller::new(requests, watcher::Config::default())
             .owns(pods, watcher::Config::default().labels(&pod_selector))
             .with_config(controller::Config::default().concurrency(workers))
             .graceful_shutdown_on(async move { stop.cancelled().await })
             .run(reconcile, error_policy, ctx)
-            .for_each(|result| async move {
+            .for_each(move |result| {
                 match result {
                     Ok(_) => {}
                     // Logged and retried by error_policy.
                     Err(controller::Error::ReconcilerFailed(..)) => {}
                     Err(controller::Error::ObjectNotFound(obj)) => {
                         debug!(object = %obj, "Object vanished before it could be reconciled");
+                        // Forget its retry backoff.
+                        let key = (obj.namespace.clone().unwrap_or_default(), obj.name.clone());
+                        lock(&failures.failures).remove(&key);
                     }
                     Err(err) => warn!(error = %err, "Controller watch error"),
                 }
+                std::future::ready(())
             });
 
         let drain_deadline = async {
