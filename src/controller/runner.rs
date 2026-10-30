@@ -23,8 +23,6 @@ use super::{
 use crate::api::NixBuildRequest;
 use crate::lock;
 
-const CONTROLLER_NAME: &str = "nixbuildrequest";
-
 /// Per-object retry backoff after a failed reconcile: 5ms doubling up to 1000s,
 /// reset on success.
 const BACKOFF_BASE: Duration = Duration::from_millis(5);
@@ -44,26 +42,24 @@ impl Metrics {
     /// Registers the controller metrics in a fresh registry.
     pub fn new() -> Self {
         let registry = Registry::new();
-        let label = |opts: Opts| opts.const_label("controller", CONTROLLER_NAME);
         let reconcile_total = IntCounterVec::new(
-            label(Opts::new(
-                "controller_runtime_reconcile_total",
-                "Total number of reconciliations per controller",
-            )),
+            Opts::new(
+                "nix_remote_build_controller_reconcile_total",
+                "Reconciles, by result",
+            ),
             &["result"],
         )
         .expect("valid metric");
-        let reconcile_errors = IntCounter::with_opts(label(Opts::new(
-            "controller_runtime_reconcile_errors_total",
-            "Total number of reconciliation errors per controller",
-        )))
+        let reconcile_errors = IntCounter::with_opts(Opts::new(
+            "nix_remote_build_controller_reconcile_errors_total",
+            "Reconciles that failed and will be retried",
+        ))
         .expect("valid metric");
         let reconcile_time = Histogram::with_opts(
             HistogramOpts::new(
-                "controller_runtime_reconcile_time_seconds",
-                "Length of time per reconciliation per controller",
+                "nix_remote_build_controller_reconcile_duration_seconds",
+                "Time taken by each reconcile",
             )
-            .const_label("controller", CONTROLLER_NAME)
             .buckets(vec![
                 0.005, 0.01, 0.025, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.6,
                 0.7, 0.8, 0.9, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 6.0, 7.0,
@@ -71,15 +67,15 @@ impl Metrics {
             ]),
         )
         .expect("valid metric");
-        let max_concurrent_reconciles = IntGauge::with_opts(label(Opts::new(
-            "controller_runtime_max_concurrent_reconciles",
-            "Maximum number of concurrent reconciles per controller",
-        )))
+        let max_concurrent_reconciles = IntGauge::with_opts(Opts::new(
+            "nix_remote_build_controller_max_concurrent_reconciles",
+            "Reconciles allowed to run at the same time",
+        ))
         .expect("valid metric");
-        let active_workers = IntGauge::with_opts(label(Opts::new(
-            "controller_runtime_active_workers",
-            "Number of currently used workers per controller",
-        )))
+        let active_workers = IntGauge::with_opts(Opts::new(
+            "nix_remote_build_controller_active_reconciles",
+            "Reconciles running now",
+        ))
         .expect("valid metric");
         for collector in [
             Box::new(reconcile_total.clone()) as Box<dyn prometheus::core::Collector>,
@@ -310,11 +306,7 @@ mod tests {
             .inc();
         metrics.max_concurrent_reconciles.set(10);
         let text = metrics.render();
-        assert!(
-            text.contains("controller_runtime_reconcile_total{controller=\"nixbuildrequest\",result=\"success\"} 1")
-        );
-        assert!(text.contains(
-            "controller_runtime_max_concurrent_reconciles{controller=\"nixbuildrequest\"} 10"
-        ));
+        assert!(text.contains("nix_remote_build_controller_reconcile_total{result=\"success\"} 1"));
+        assert!(text.contains("nix_remote_build_controller_max_concurrent_reconciles 10"));
     }
 }
