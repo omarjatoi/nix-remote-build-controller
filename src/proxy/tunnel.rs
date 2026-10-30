@@ -6,7 +6,7 @@ use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::anyhow;
 use bytes::Bytes;
@@ -15,10 +15,12 @@ use russh::{Channel, ChannelId, ChannelMsg, ChannelReadHalf, ChannelWriteHalf, c
 use tokio::net::TcpStream;
 use tokio::sync::{Notify, mpsc};
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use super::SshProxy;
+use super::config::Config;
 use super::session::SessionResult;
 use super::stream::CancellableStream;
 use crate::duration::format as fmt_duration;
@@ -190,7 +192,7 @@ impl SshProxy {
         };
 
         info!(builder_addr = %addr, "Connected to builder pod, tunnelling session");
-        let result = tunnel_session(client, channel, &tunnel, self.cfg.client_close_grace).await;
+        let result = tunnel_session(client, channel, &tunnel, &self.cfg).await;
         // The builder connection lives until the tunnel is done.
         drop(builder);
         result
@@ -210,9 +212,13 @@ impl SshProxy {
 ///   and the client is slowed down (a builder with a slow disk, for example).
 /// - While output to the client is in progress, reading continues up to
 ///   `INPUT_HARD_LIMIT`, so the output can always drain.
-/// - Beyond `INPUT_HARD_LIMIT` with output still in progress, the session
-///   fails instead of hanging. Nix never sends large input while the builder
-///   writes output, so only abnormal sessions reach this.
+/// - If the builder makes no progress at all for `input_stall_timeout`, reading
+///   also continues up to `INPUT_HARD_LIMIT`. A stopped connection cannot see
+///   the client leave; reading again lets the proxy notice it and end the
+///   session.
+/// - Beyond `INPUT_HARD_LIMIT` in either case, the session fails instead of
+///   hanging. Nix never sends large input that the builder does not read, so
+///   only abnormal sessions reach this.
 const INPUT_SOFT_LIMIT: usize = 4 << 20;
 const INPUT_HARD_LIMIT: usize = 128 << 20;
 
@@ -229,10 +235,14 @@ struct Shared {
     output_busy: AtomicBool,
     /// Wakes the client reader when either of the above changes.
     input_room: Notify,
+    /// When the builder last read input or the client last received output.
+    last_progress: Mutex<Instant>,
+    /// No progress for this long counts as a stalled builder.
+    stall_timeout: Duration,
 }
 
 impl Shared {
-    fn new(tunnel: CancellationToken) -> Self {
+    fn new(tunnel: CancellationToken, stall_timeout: Duration) -> Self {
         Self {
             tunnel,
             exit_status: Mutex::new(None),
@@ -241,6 +251,8 @@ impl Shared {
             input_buffered: AtomicUsize::new(0),
             output_busy: AtomicBool::new(false),
             input_room: Notify::new(),
+            last_progress: Mutex::new(Instant::now()),
+            stall_timeout,
         }
     }
 
@@ -254,8 +266,9 @@ impl Shared {
         }
     }
 
-    /// Waits until more client input may be read. `false` means the input
-    /// limit was reached while output is in progress (see `INPUT_HARD_LIMIT`).
+    /// Waits until more client input may be read. `false` means
+    /// `INPUT_HARD_LIMIT` was reached while output was in progress or the
+    /// builder was stalled.
     async fn wait_for_input_room(&self) -> bool {
         loop {
             let room = self.input_room.notified();
@@ -266,11 +279,19 @@ impl Shared {
             if buffered < INPUT_SOFT_LIMIT {
                 return true;
             }
-            if self.output_busy.load(Ordering::SeqCst) {
+            let stalled_at = *lock(&self.last_progress) + self.stall_timeout;
+            if self.output_busy.load(Ordering::SeqCst) || Instant::now() >= stalled_at {
                 return buffered < INPUT_HARD_LIMIT;
             }
-            room.await;
+            tokio::select! {
+                () = room => {}
+                () = tokio::time::sleep_until(stalled_at) => {}
+            }
         }
+    }
+
+    fn progressed(&self) {
+        *lock(&self.last_progress) = Instant::now();
     }
 
     fn input_read(&self, msg: &ChannelMsg) {
@@ -281,6 +302,7 @@ impl Shared {
 
     fn input_written(&self, len: usize) {
         self.input_buffered.fetch_sub(len, Ordering::SeqCst);
+        self.progressed();
         self.input_room.notify_waiters();
     }
 
@@ -290,6 +312,7 @@ impl Shared {
         self.input_room.notify_waiters();
         let result = write.await;
         self.output_busy.store(false, Ordering::SeqCst);
+        self.progressed();
         result
     }
 }
@@ -318,8 +341,9 @@ async fn tunnel_session(
     client: ClientSide,
     builder: Channel<client::Msg>,
     tunnel: &CancellationToken,
-    client_close_grace: Duration,
+    cfg: &Config,
 ) -> SessionResult {
+    let client_close_grace = cfg.client_close_grace;
     let ClientSide {
         read: client_read,
         writer,
@@ -327,7 +351,7 @@ async fn tunnel_session(
         ..
     } = client;
     let (builder_read, builder_write) = builder.split();
-    let shared = Arc::new(Shared::new(tunnel.clone()));
+    let shared = Arc::new(Shared::new(tunnel.clone(), cfg.input_stall_timeout));
     let (input_tx, input_rx) = mpsc::unbounded_channel();
 
     let mut from_client: JoinHandle<ClientEnd> = tokio::spawn(read_client(
@@ -910,7 +934,10 @@ mod tests {
     use super::*;
 
     fn shared_with_input(bytes: usize) -> Arc<Shared> {
-        let shared = Arc::new(Shared::new(CancellationToken::new()));
+        let shared = Arc::new(Shared::new(
+            CancellationToken::new(),
+            Duration::from_secs(60),
+        ));
         shared.input_buffered.store(bytes, Ordering::SeqCst);
         shared
     }
@@ -970,6 +997,35 @@ mod tests {
                 .unwrap()
         );
         output.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn input_keeps_flowing_once_the_builder_stalls() {
+        let shared = shared_with_input(INPUT_SOFT_LIMIT);
+        let waiter = {
+            let shared = Arc::clone(&shared);
+            tokio::spawn(async move { shared.wait_for_input_room().await })
+        };
+        tokio::time::sleep(Duration::from_secs(59)).await;
+        assert!(
+            !waiter.is_finished(),
+            "a builder is not stalled before the timeout"
+        );
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(
+            waiter.await.unwrap(),
+            "a stalled builder lets input flow again"
+        );
+
+        // Any progress restarts the clock.
+        shared.progressed();
+        assert_eq!(has_room_now(&shared).await, None);
+        // Past the hard limit, a stalled builder ends the session.
+        shared
+            .input_buffered
+            .store(INPUT_HARD_LIMIT, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_secs(61)).await;
+        assert_eq!(has_room_now(&shared).await, Some(false));
     }
 
     #[tokio::test]

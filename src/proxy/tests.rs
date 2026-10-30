@@ -240,6 +240,11 @@ async fn run_builder_session(
 
     let status = match cmd.as_str() {
         "echo-upper" => echo_upper(&mut channel).await,
+        "stall" => {
+            // Never read stdin: the builder is hung.
+            closed.cancelled().await;
+            0
+        }
         "hang" => {
             // Ignore stdin EOF; only end when the connection is torn down.
             while channel.wait().await.is_some() {}
@@ -1008,6 +1013,53 @@ async fn client_close_without_eof_still_ends_builder_stdin() {
     assert!(start.elapsed() < Duration::from_secs(3));
     drop(channel);
     drop(client);
+    h.stop().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn client_leaving_a_stalled_builder_ends_the_session() {
+    let mut h = Harness::new(HarnessOpts {
+        cfg: |c| {
+            c.input_stall_timeout = Duration::from_millis(500);
+            c.client_close_grace = Duration::from_millis(300);
+            // A real builder's sshd answers keepalives even when the build
+            // hangs; the fake builder cannot, so keepalives would end the
+            // session for the wrong reason.
+            c.keepalive_interval = Duration::ZERO;
+        },
+        ..Default::default()
+    })
+    .await;
+    let client = h.dial().await;
+    let channel = client.channel_open_session().await.unwrap();
+    channel.exec(true, "stall").await.unwrap();
+    wait_until("the builder session", Duration::from_secs(5), || {
+        h.builder.stats.active.load(Ordering::SeqCst) == 1
+    })
+    .await;
+
+    // Send much more input than the proxy buffers. The builder reads none of
+    // it, so the proxy stops reading and the client's writes block.
+    let writer = tokio::spawn(async move {
+        let chunk = Bytes::from(vec![0u8; 1 << 20]);
+        for _ in 0..32 {
+            if channel.data_bytes(chunk.clone()).await.is_err() {
+                break;
+            }
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !writer.is_finished(),
+        "the proxy should be slowing the client down"
+    );
+    assert_eq!(h.proxy.session_count(), 1);
+
+    // The client goes away. Once the builder counts as stalled the proxy
+    // reads again, sees the disconnect and cleans up.
+    writer.abort();
+    drop(client);
+    h.wait_no_requests().await;
     h.stop().await.unwrap();
 }
 

@@ -42,6 +42,10 @@ pub struct Config {
     /// How long the builder side may keep running after the client closed its
     /// channel before the tunnel is torn down.
     pub client_close_grace: Duration,
+    /// How long a builder may make no progress (read no input, write no
+    /// output) while client input waits for it, before the proxy reads more
+    /// input anyway. See `INPUT_SOFT_LIMIT` in the tunnel.
+    pub input_stall_timeout: Duration,
     /// Caps concurrent build sessions. Zero means unlimited.
     pub max_sessions: usize,
 
@@ -60,6 +64,7 @@ pub const DEFAULT_BUILDER_DIAL_TIMEOUT: Duration = Duration::from_secs(15);
 pub const DEFAULT_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 pub const DEFAULT_CLIENT_CLOSE_GRACE: Duration = Duration::from_secs(30);
+pub const DEFAULT_INPUT_STALL_TIMEOUT: Duration = Duration::from_secs(60);
 pub const DEFAULT_REMOTE_USER: &str = "nixbld";
 pub const DEFAULT_REMOTE_PORT: u16 = 22;
 pub const DEFAULT_NAMESPACE: &str = "default";
@@ -79,6 +84,7 @@ impl Config {
         or(&mut self.builder_dial_timeout, DEFAULT_BUILDER_DIAL_TIMEOUT);
         or(&mut self.poll_interval, DEFAULT_POLL_INTERVAL);
         or(&mut self.client_close_grace, DEFAULT_CLIENT_CLOSE_GRACE);
+        or(&mut self.input_stall_timeout, DEFAULT_INPUT_STALL_TIMEOUT);
         if self.remote_user.is_empty() {
             self.remote_user = DEFAULT_REMOTE_USER.to_string();
         }
