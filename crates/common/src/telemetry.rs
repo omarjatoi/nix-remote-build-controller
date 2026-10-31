@@ -6,7 +6,6 @@
 //! endpoint is set.
 
 use anyhow::Context as _;
-use opentelemetry::trace::TracerProvider as _;
 use opentelemetry::{Key, KeyValue};
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_otlp::{LogExporter, MetricExporter, SpanExporter};
@@ -15,11 +14,10 @@ use opentelemetry_sdk::logs::SdkLoggerProvider;
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use tracing::level_filters::LevelFilter;
 use tracing::{Span, Subscriber, info, warn};
-use tracing_subscriber::Layer;
-use tracing_subscriber::filter::{self, FilterExt as _, Targets};
-use tracing_subscriber::layer::{Context, Filter, SubscriberExt as _};
+use tracing_subscriber::filter::{self, Targets};
+use tracing_subscriber::layer::{Context, Filter};
 use tracing_subscriber::registry::LookupSpan;
-use tracing_subscriber::util::SubscriberInitExt as _;
+use tracing_subscriber::{EnvFilter, Layer};
 
 use crate::logging;
 use crate::metrics_provider::MetricsProvider;
@@ -41,20 +39,19 @@ pub(crate) fn trace_filter<S>() -> impl Filter<S>
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
-    let workspace = Targets::new()
-        .with_targets(
-            logging::WORKSPACE_CRATES
-                .iter()
-                .map(|krate| (*krate, LevelFilter::INFO)),
-        )
-        .with_target(TRACE_ONLY_TARGET, LevelFilter::INFO);
+    use tracing_subscriber::filter::FilterExt as _;
+
+    let mut workspace = Targets::new().with_target(TRACE_ONLY_TARGET, LevelFilter::INFO);
+    for krate in logging::WORKSPACE_CRATES {
+        workspace = workspace.with_target(krate, LevelFilter::INFO);
+    }
     workspace.or(filter::dynamic_filter_fn(
-        |metadata, cx: &Context<'_, S>| {
-            metadata.is_span()
-                && metadata.target().starts_with("kube_client")
-                && cx
-                    .lookup_current()
-                    .is_some_and(|span| span.scope().any(|ancestor| ancestor.name() == "reconcile"))
+        |metadata, context: &Context<'_, S>| {
+            let in_reconcile = || {
+                let current = context.lookup_current();
+                current.is_some_and(|span| span.scope().any(|parent| parent.name() == "reconcile"))
+            };
+            metadata.is_span() && metadata.target().starts_with("kube_client") && in_reconcile()
         },
     ))
 }
@@ -113,57 +110,35 @@ impl Telemetry {
         }
         let resource = resource(service, version);
 
-        let tracer_provider = otlp
-            .traces
-            .then(|| {
-                let exporter = SpanExporter::builder()
-                    .build()
-                    .context("create OTLP trace exporter")?;
-                anyhow::Ok(
-                    SdkTracerProvider::builder()
-                        .with_resource(resource.clone())
-                        .with_batch_exporter(exporter)
-                        .build(),
-                )
-            })
-            .transpose()?;
-        let logger_provider = otlp
-            .logs
-            .then(|| {
-                let exporter = LogExporter::builder()
-                    .build()
-                    .context("create OTLP log exporter")?;
-                anyhow::Ok(
-                    SdkLoggerProvider::builder()
-                        .with_resource(resource.clone())
-                        .with_batch_exporter(exporter)
-                        .build(),
-                )
-            })
-            .transpose()?;
-        let metric_exporter = otlp
-            .metrics
-            .then(|| {
-                MetricExporter::builder()
-                    .build()
-                    .context("create OTLP metric exporter")
-            })
-            .transpose()?;
+        let tracer_provider = if otlp.traces {
+            Some(tracer_provider(resource.clone())?)
+        } else {
+            None
+        };
+        let logger_provider = if otlp.logs {
+            Some(logger_provider(resource.clone())?)
+        } else {
+            None
+        };
+        let metric_exporter = if otlp.metrics {
+            let exporter = MetricExporter::builder().build();
+            Some(exporter.context("create OTLP metric exporter")?)
+        } else {
+            None
+        };
         let metrics = MetricsProvider::with_otlp(resource, metric_exporter)?;
 
         let trace_layer = tracer_provider.as_ref().map(|provider| {
+            use opentelemetry::trace::TracerProvider as _;
             tracing_opentelemetry::layer()
                 .with_tracer(provider.tracer("nix-remote-build-controller"))
                 .with_filter(trace_filter())
         });
         let log_layer = logger_provider.as_ref().map(|provider| {
-            let filter = EXPORT_CRATES
-                .iter()
-                .fold(logging::filter(level), |filter, name| {
-                    filter.add_directive(format!("{name}=off").parse().expect("valid directive"))
-                });
-            OpenTelemetryTracingBridge::new(provider).with_filter(filter)
+            OpenTelemetryTracingBridge::new(provider).with_filter(log_filter(level))
         });
+        use tracing_subscriber::layer::SubscriberExt as _;
+        use tracing_subscriber::util::SubscriberInitExt as _;
         // Replacing an installed subscriber only happens in tests.
         let _ = tracing_subscriber::registry()
             .with(logging::stderr_layer(level))
@@ -209,6 +184,36 @@ impl Telemetry {
             warn!(error = %err, "Failed to shut down telemetry");
         }
     }
+}
+
+fn tracer_provider(resource: Resource) -> anyhow::Result<SdkTracerProvider> {
+    let exporter = SpanExporter::builder()
+        .build()
+        .context("create OTLP trace exporter")?;
+    Ok(SdkTracerProvider::builder()
+        .with_resource(resource)
+        .with_batch_exporter(exporter)
+        .build())
+}
+
+fn logger_provider(resource: Resource) -> anyhow::Result<SdkLoggerProvider> {
+    let exporter = LogExporter::builder()
+        .build()
+        .context("create OTLP log exporter")?;
+    Ok(SdkLoggerProvider::builder()
+        .with_resource(resource)
+        .with_batch_exporter(exporter)
+        .build())
+}
+
+/// What is sent to the log exporter: the logs on stderr, except for those of
+/// [`EXPORT_CRATES`].
+fn log_filter(level: LevelFilter) -> EnvFilter {
+    let mut filter = logging::filter(level);
+    for name in EXPORT_CRATES {
+        filter = filter.add_directive(format!("{name}=off").parse().expect("valid directive"));
+    }
+    filter
 }
 
 /// Marks `span` as failed. It must have declared the fields `otel.status_code`

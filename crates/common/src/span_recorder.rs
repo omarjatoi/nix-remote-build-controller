@@ -1,11 +1,8 @@
 //! Records finished spans, for tests.
 
-use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider, SpanData};
 use tracing::Dispatch;
 use tracing::subscriber::DefaultGuard;
-use tracing_subscriber::Layer as _;
-use tracing_subscriber::layer::SubscriberExt as _;
 
 use crate::telemetry;
 
@@ -22,6 +19,10 @@ pub struct SpanRecorder {
 impl SpanRecorder {
     /// Starts recording.
     pub fn start() -> Self {
+        use opentelemetry::trace::TracerProvider as _;
+        use tracing_subscriber::Layer as _;
+        use tracing_subscriber::layer::SubscriberExt as _;
+
         // tracing caches whether a callsite is enabled. With a single dispatch
         // it asks the default of whichever thread gets there first, which can
         // be a test that does not record. A second one makes it ask them all.

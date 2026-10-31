@@ -3,7 +3,6 @@
 use std::fmt;
 
 use opentelemetry::Context;
-use opentelemetry::trace::TraceContextExt as _;
 use tracing::level_filters::LevelFilter;
 use tracing::{Event, Subscriber};
 use tracing_subscriber::fmt::format::{JsonFields, Writer};
@@ -82,6 +81,7 @@ where
         let mut line = String::new();
         self.0.format_event(ctx, Writer::new(&mut line), event)?;
         let ids = Context::map_current(|context| {
+            use opentelemetry::trace::TraceContextExt as _;
             let span = context.span();
             let span = span.span_context();
             span.is_valid().then(|| {
@@ -217,6 +217,35 @@ mod tests {
         assert_eq!(inside["message"], "inside");
         assert_eq!(inside["trace_id"].as_str().unwrap().len(), 32);
         assert_eq!(inside["span_id"].as_str().unwrap().len(), 16);
+    }
+
+    /// Spans that only go to the trace exporter must not hide the fields of
+    /// the span around them.
+    #[test]
+    fn log_lines_show_the_session_inside_trace_only_spans() {
+        let buf = Buffer::default();
+        let format = tracing_subscriber::fmt::format()
+            .json()
+            .flatten_event(true)
+            .with_current_span(true)
+            .with_span_list(false);
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .event_format(format)
+                .fmt_fields(JsonFields::new())
+                .with_writer(buf.clone())
+                .with_filter(filter(LevelFilter::INFO)),
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            let session = tracing::error_span!("session", session_id = "abc");
+            let _session = session.enter();
+            let tunnel = tracing::info_span!(target: TRACE_ONLY_TARGET, "tunnel", other = 1);
+            let _tunnel = tunnel.enter();
+            tracing::warn!("shown");
+        });
+        let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        let line: serde_json::Value = serde_json::from_str(out.lines().next().unwrap()).unwrap();
+        assert_eq!(line["span"]["session_id"], "abc", "{out}");
     }
 
     /// Context spans must survive a warn-only filter, or warnings lose the

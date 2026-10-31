@@ -3,7 +3,7 @@
 
 use anyhow::Context as _;
 use axum::http::header::CONTENT_TYPE;
-use opentelemetry::metrics::{Meter, MeterProvider as _};
+use opentelemetry::metrics::Meter;
 use opentelemetry_otlp::MetricExporter;
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::metrics::SdkMeterProvider;
@@ -51,6 +51,7 @@ impl MetricsProvider {
 
     /// The meter for this program's instruments.
     pub fn meter(&self) -> Meter {
+        use opentelemetry::metrics::MeterProvider as _;
         self.provider.meter(METER_NAME)
     }
 
