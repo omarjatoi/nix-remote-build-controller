@@ -1,0 +1,25 @@
+[package]
+name = "api"
+description = "The NixBuildRequest custom resource and the Kubernetes calls made on it"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+# An in-memory Kubernetes API for tests (`api::fake`).
+testing = []
+
+[dependencies]
+async-trait.workspace = true
+k8s-openapi.workspace = true
+kube.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

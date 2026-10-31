@@ -19,7 +19,10 @@ spec:
               properties:
                 sessionId:
                   type: string
-                  description: "SessionID links this build request to the SSH proxy session"
+                  description: "SessionID links this build request to the SSH proxy session. It becomes part of the builder pod name, so it must be a DNS label of at most 51 characters."
+                  minLength: 1
+                  maxLength: 51
+                  pattern: "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
                 resources:
                   type: object
                   description: "Resources defines the pod resource requirements"

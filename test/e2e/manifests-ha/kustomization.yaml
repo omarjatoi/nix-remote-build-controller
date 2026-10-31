@@ -1,0 +1,19 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# High-availability overlay for the end-to-end test (HA=1): two controller
+# replicas with leader election on a multi-node Kind cluster.
+resources:
+  - ../manifests
+
+patches:
+  - target:
+      kind: Deployment
+      name: controller
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 2
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --leader-elect

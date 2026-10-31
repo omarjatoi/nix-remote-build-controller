@@ -24,8 +24,8 @@ metadata:
     component: proxy
 spec:
   replicas: 1
-  # Each proxy pod owns the NixBuildRequests it creates (via ownerReferences), so
-  # rolling a new pod in before the old one drains would orphan in-flight builds.
+  # One proxy pod at a time. To run more replicas, see "High availability" in
+  # the README.
   strategy:
     type: Recreate
   selector:
@@ -37,8 +37,8 @@ spec:
         component: proxy
     spec:
       serviceAccountName: nix-remote-build-controller
-      # Give in-flight builds time to finish when the pod is deleted; must be >=
-      # the proxy's --shutdown-timeout.
+      # Lets running builds finish when the pod stops. Keep this longer than
+      # --shutdown-timeout.
       terminationGracePeriodSeconds: 1830
       securityContext:
         runAsNonRoot: true
@@ -62,8 +62,8 @@ spec:
             - --keepalive-interval=30s
             - --log-level=info
           env:
-            # Used to set ownerReferences on NixBuildRequests so they (and their
-            # builder pods) are garbage-collected if this proxy pod dies.
+            # Build requests point to this pod as their owner, so Kubernetes
+            # deletes them (and their builder pods) if this pod is deleted.
             - name: PROXY_POD_NAME
               valueFrom:
                 fieldRef:
