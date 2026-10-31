@@ -468,6 +468,7 @@ impl Harness {
             builder_client_key,
             opts.client_auth,
             Some(builder.host_key.clone()),
+            Metrics::new(&opentelemetry::global::meter("test")),
         )
         .await
         .expect("create proxy");

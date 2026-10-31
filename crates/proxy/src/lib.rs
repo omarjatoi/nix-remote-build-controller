@@ -9,6 +9,7 @@
 mod auth;
 mod config;
 mod keys;
+mod metrics;
 mod server;
 mod session;
 mod stream;
@@ -16,6 +17,7 @@ mod tunnel;
 
 pub use auth::{ClientAuthorizer, fingerprint};
 pub use config::*;
+pub use metrics::Metrics;
 pub use server::SshProxy;
 pub use session::{
     ANNOTATION_PROXY_POD, LABEL_MANAGED_BY, MANAGED_BY_VALUE, Session, SessionResult,

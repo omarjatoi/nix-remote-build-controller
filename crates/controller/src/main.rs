@@ -1,7 +1,6 @@
 //! The controller: creates a builder pod for each NixBuildRequest.
 
 use std::process::ExitCode;
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context as _, bail};
@@ -11,9 +10,10 @@ use kube::runtime::events::Reporter;
 use kube::{Api, Client};
 use tokio_util::sync::CancellationToken;
 use tracing::level_filters::LevelFilter;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use api::{KubeControllerClient, secret};
+use common::Telemetry;
 use common::http::{self, HttpServer};
 use common::{duration, error, logging, shutdown};
 use controller::leader::{LeaderElectionConfig, LeaderElector};
@@ -21,6 +21,9 @@ use controller::{Metrics, Reconciler, ReconcilerConfig, Runner};
 
 /// The version reported by `controller version`.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// How this program is named in exported telemetry.
+const SERVICE_NAME: &str = "nix-remote-build-controller";
 
 const LEADER_ELECTION_ID: &str = "nix-remote-build-controller.nix.io";
 const REPORTER_NAME: &str = "nix-remote-build-controller";
@@ -130,8 +133,16 @@ async fn main() -> ExitCode {
 }
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
-    logging::init(cli.log_level);
+    let telemetry = Telemetry::init(SERVICE_NAME, VERSION, cli.log_level)?;
+    let result = serve(cli, &telemetry).await;
+    if let Err(err) = &result {
+        error!(error = %error::chain(err), "Controller failed");
+    }
+    telemetry.shutdown().await;
+    result
+}
 
+async fn serve(cli: Cli, telemetry: &Telemetry) -> anyhow::Result<()> {
     let builder_image = cli.builder_image.clone().unwrap_or_default();
     if builder_image.is_empty() {
         bail!("--builder-image must not be empty");
@@ -161,6 +172,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         controller: REPORTER_NAME.to_string(),
         instance: Some(identity.clone()),
     };
+    let metrics = Metrics::new(&telemetry.metrics().meter());
     let reconciler = Reconciler::new(
         KubeControllerClient::new(client.clone(), reporter),
         ReconcilerConfig {
@@ -174,21 +186,11 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             completed_ttl: cli.completed_ttl,
             builder_service_account: non_empty(&cli.builder_service_account),
         },
+        metrics.clone(),
     );
 
-    let metrics = Arc::new(Metrics::new());
     let health = start_health_server(cli.health_port).await?;
-    let metrics_server = match cli.metrics_addr.trim() {
-        "" | "0" => None,
-        addr => {
-            let listener = http::bind(addr).await.context("listen metrics server")?;
-            Some(HttpServer::spawn(
-                "Metrics",
-                listener,
-                Arc::clone(&metrics).router(),
-            )?)
-        }
-    };
+    let metrics_server = telemetry.metrics().serve(&cli.metrics_addr).await?;
 
     info!(
         version = VERSION,

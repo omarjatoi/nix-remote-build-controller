@@ -15,6 +15,7 @@ use api::{BuildPhase, NixBuildRequest, NixBuildRequestSpec};
 use common::duration;
 
 use crate::SshProxy;
+use crate::metrics::SessionOutcome;
 
 /// Standard managed-by label.
 pub const LABEL_MANAGED_BY: &str = "app.kubernetes.io/managed-by";
@@ -74,6 +75,15 @@ impl SessionResult {
         Self {
             exit_status: None,
             err: Some(err),
+        }
+    }
+
+    /// The session's outcome for the metrics.
+    pub(crate) fn outcome(&self) -> SessionOutcome {
+        match (&self.err, self.exit_status) {
+            (Some(_), _) => SessionOutcome::Error,
+            (None, None | Some(0)) => SessionOutcome::Success,
+            (None, Some(_)) => SessionOutcome::CommandFailed,
         }
     }
 }

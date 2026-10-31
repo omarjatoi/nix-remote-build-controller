@@ -1,7 +1,15 @@
 //! Structured JSON logging to stderr.
 
+use std::fmt;
+
+use opentelemetry::Context;
+use opentelemetry::trace::TraceContextExt as _;
 use tracing::level_filters::LevelFilter;
-use tracing_subscriber::EnvFilter;
+use tracing::{Event, Subscriber};
+use tracing_subscriber::fmt::format::{JsonFields, Writer};
+use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields};
+use tracing_subscriber::registry::LookupSpan;
+use tracing_subscriber::{EnvFilter, Layer};
 
 /// Parses a `--log-level` value: `trace`, `debug`, `info`, `warn`, `error` or
 /// `off`.
@@ -19,24 +27,69 @@ pub fn parse_level(level: &str) -> Result<LevelFilter, String> {
     }
 }
 
-/// Installs the global JSON logger. Messages from this crate are logged at
-/// `level`; dependencies (kube, russh, hyper) are capped at warn so the output
-/// stays focused on the proxy and controller. `RUST_LOG`, when set, overrides
-/// the filter entirely.
-pub fn init(level: LevelFilter) {
-    let filter = match std::env::var("RUST_LOG") {
-        Ok(spec) if !spec.trim().is_empty() => EnvFilter::new(spec),
-        _ => default_filter(level),
-    };
-    let _ = tracing_subscriber::fmt()
+/// The layer that writes JSON logs to stderr. Messages from this workspace are
+/// logged at `level`; dependencies (kube, russh, hyper) are capped at warn so
+/// the output stays focused on the proxy and controller. `RUST_LOG`, when set,
+/// overrides the filter entirely.
+pub(crate) fn stderr_layer<S>(level: LevelFilter) -> impl Layer<S>
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+{
+    let format = tracing_subscriber::fmt::format()
         .json()
         .flatten_event(true)
         .with_current_span(true)
         .with_span_list(false)
-        .with_target(false)
-        .with_env_filter(filter)
+        .with_target(false);
+    tracing_subscriber::fmt::layer()
+        .event_format(TraceIdFormat(format))
+        .fmt_fields(JsonFields::new())
         .with_writer(std::io::stderr)
-        .try_init();
+        .with_filter(filter(level))
+}
+
+/// The filter for logs: see [`stderr_layer`].
+pub(crate) fn filter(level: LevelFilter) -> EnvFilter {
+    match std::env::var("RUST_LOG") {
+        Ok(spec) if !spec.trim().is_empty() => EnvFilter::new(spec),
+        _ => default_filter(level),
+    }
+}
+
+/// Adds the current trace and span IDs to the JSON objects of another format,
+/// to find the trace of a log line and the other way round.
+struct TraceIdFormat<F>(F);
+
+impl<S, N, F> FormatEvent<S, N> for TraceIdFormat<F>
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+    N: for<'a> FormatFields<'a> + 'static,
+    F: FormatEvent<S, N>,
+{
+    fn format_event(
+        &self,
+        ctx: &FmtContext<'_, S, N>,
+        mut writer: Writer<'_>,
+        event: &Event<'_>,
+    ) -> fmt::Result {
+        let mut line = String::new();
+        self.0.format_event(ctx, Writer::new(&mut line), event)?;
+        let ids = Context::map_current(|context| {
+            let span = context.span();
+            let span = span.span_context();
+            span.is_valid().then(|| {
+                format!(
+                    ",\"trace_id\":\"{}\",\"span_id\":\"{}\"}}\n",
+                    span.trace_id(),
+                    span.span_id()
+                )
+            })
+        });
+        match (ids, line.strip_suffix("}\n")) {
+            (Some(ids), Some(object)) => write!(writer, "{object}{ids}"),
+            _ => writer.write_str(&line),
+        }
+    }
 }
 
 /// Logs this workspace's crates at `level` and everything else at warn or
@@ -58,7 +111,10 @@ mod tests {
     use std::io::Write;
     use std::sync::{Arc, Mutex};
 
+    use opentelemetry::trace::TracerProvider as _;
+    use opentelemetry_sdk::trace::SdkTracerProvider;
     use tracing_subscriber::fmt::MakeWriter;
+    use tracing_subscriber::layer::SubscriberExt as _;
 
     use super::*;
 
@@ -122,6 +178,38 @@ mod tests {
             out.contains("kube warning"),
             "dependency warnings are logged: {out}"
         );
+    }
+
+    #[test]
+    fn log_lines_carry_the_ids_of_their_trace() {
+        let buf = Buffer::default();
+        let provider = SdkTracerProvider::builder().build();
+        let format = tracing_subscriber::fmt::format().json().flatten_event(true);
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")))
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .event_format(TraceIdFormat(format))
+                    .fmt_fields(JsonFields::new())
+                    .with_writer(buf.clone()),
+            );
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!("outside");
+            let span = tracing::error_span!("session");
+            let _enter = span.enter();
+            tracing::info!("inside");
+        });
+        let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        let mut lines = out
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap());
+        let outside = lines.next().unwrap();
+        assert_eq!(outside["message"], "outside");
+        assert!(outside.get("trace_id").is_none());
+        let inside = lines.next().unwrap();
+        assert_eq!(inside["message"], "inside");
+        assert_eq!(inside["trace_id"].as_str().unwrap().len(), 32);
+        assert_eq!(inside["span_id"].as_str().unwrap().len(), 16);
     }
 
     /// Context spans must survive a warn-only filter, or warnings lose the

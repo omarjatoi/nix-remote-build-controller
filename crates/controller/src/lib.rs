@@ -8,17 +8,19 @@
 
 mod config;
 pub mod leader;
+mod metrics;
 mod reconciler;
 mod runner;
 
 pub use config::{parse_pull_policy, parse_resources};
+pub use metrics::Metrics;
 pub use reconciler::{
     BUILDER_HOST_KEY_MOUNT_PATH, DEFAULT_BUILD_TIMEOUT_SECONDS, DEFAULT_COMPLETED_TTL,
     DEFAULT_MAX_CONCURRENT_RECONCILES, DEFAULT_POD_TERMINATION_GRACE_PERIOD_SECONDS,
     FINALIZER_NAME, LABEL_APP, LABEL_APP_VALUE, LABEL_BUILD_REQUEST, ReconcileAction,
     ReconcileError, Reconciler, ReconcilerConfig, builder_pod_name,
 };
-pub use runner::{Metrics, Runner};
+pub use runner::Runner;
 
 #[cfg(test)]
 mod tests;

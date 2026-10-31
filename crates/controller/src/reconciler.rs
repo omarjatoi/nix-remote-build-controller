@@ -11,11 +11,14 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference,
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::runtime::events::EventType;
 use kube::{Resource, ResourceExt};
+use opentelemetry::KeyValue;
 use tracing::{Instrument, debug, error_span, info, warn};
 
 use api::{BuildEvent, BuildPhase, ControllerClient, NixBuildRequest, NixBuildRequestStatus};
 use api::{kube_error, secret};
 use common::duration;
+
+use crate::Metrics;
 
 /// Finalizer guarding builder pod cleanup.
 pub const FINALIZER_NAME: &str = "nix.io/cleanup";
@@ -111,14 +114,19 @@ pub struct ReconcilerConfig {
 pub struct Reconciler<C> {
     client: C,
     cfg: ReconcilerConfig,
+    metrics: Metrics,
 }
 
 type ReconcileResult = Result<ReconcileAction, ReconcileError>;
 
 impl<C: ControllerClient> Reconciler<C> {
     /// Creates a reconciler that talks to the API through `client`.
-    pub fn new(client: C, cfg: ReconcilerConfig) -> Self {
-        Self { client, cfg }
+    pub fn new(client: C, cfg: ReconcilerConfig, metrics: Metrics) -> Self {
+        Self {
+            client,
+            cfg,
+            metrics,
+        }
     }
 
     /// Reconciles one request. `req` is the latest cached copy of the object.
@@ -187,6 +195,7 @@ impl<C: ControllerClient> Reconciler<C> {
         match self.client.create_pod(&pod).await {
             Ok(_) => {
                 info!(pod = %pod_name, "Created builder pod");
+                self.metrics.builder_pods_created.add(1, &[]);
                 let note = format!("Created builder pod {pod_name}");
                 self.event(req, EventType::Normal, "PodCreated", "CreatePod", note);
             }
@@ -274,6 +283,11 @@ impl<C: ControllerClient> Reconciler<C> {
         if !pod_ip.is_empty() {
             let pod_name = pod.name_any();
             info!(pod = %pod_name, pod_ip, "Builder pod ready");
+            if let Some(started) = req.status.as_ref().and_then(|s| s.start_time.as_ref()) {
+                self.metrics
+                    .builder_pod_startup
+                    .record(since(started).as_secs_f64(), &[]);
+            }
             let note = format!("Builder pod {pod_name} has IP {pod_ip}");
             self.event(req, EventType::Normal, "PodReady", "AwaitReady", note);
             let mut updated = req.clone();
@@ -362,6 +376,9 @@ impl<C: ControllerClient> Reconciler<C> {
         message: &str,
     ) -> ReconcileResult {
         warn!(reason, "{message}");
+        self.metrics
+            .requests_failed
+            .add(1, &[KeyValue::new("reason", reason)]);
         self.event(
             req,
             EventType::Warning,
@@ -642,10 +659,13 @@ fn retry_on_conflict(op: &'static str, err: kube::Error) -> ReconcileResult {
 
 /// How much of `ttl` is left since `finished`, saturating at zero.
 fn remaining_ttl(finished: &Time, ttl: Duration) -> Duration {
-    let elapsed = k8s_openapi::jiff::Timestamp::now().duration_since(finished.0);
-    // A completion time in the future (clock skew) counts as "just finished".
-    let elapsed = Duration::try_from(elapsed).unwrap_or(Duration::ZERO);
-    ttl.saturating_sub(elapsed)
+    ttl.saturating_sub(since(finished))
+}
+
+/// The time since `time`. A time in the future (clock skew) counts as now.
+fn since(time: &Time) -> Duration {
+    let elapsed = k8s_openapi::jiff::Timestamp::now().duration_since(time.0);
+    Duration::try_from(elapsed).unwrap_or(Duration::ZERO)
 }
 
 fn pod_phase(pod: &Pod) -> &str {

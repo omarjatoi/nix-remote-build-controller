@@ -39,7 +39,12 @@ fn reconciler(fake: &FakeKube) -> Reconciler<FakeKube> {
             },
             builder_service_account: None,
         },
+        metrics(),
     )
+}
+
+fn metrics() -> Metrics {
+    Metrics::new(&opentelemetry::global::meter("test"))
 }
 
 fn new_request(session: &str) -> NixBuildRequest {
@@ -230,6 +235,7 @@ async fn optional_mounts_are_omitted_when_not_configured() {
             ssh_key_secret: "keys".into(),
             ..Default::default()
         },
+        metrics(),
     );
     let pod = r.builder_pod(&new_request("s"));
     let spec = pod.spec.unwrap();

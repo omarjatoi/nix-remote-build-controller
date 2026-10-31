@@ -23,6 +23,7 @@ use common::duration;
 
 use crate::SshProxy;
 use crate::config::Config;
+use crate::metrics::{Direction, Metrics};
 use crate::session::SessionResult;
 use crate::stream::CancellableStream;
 
@@ -168,6 +169,7 @@ impl SshProxy {
         let tunnel = conn_token.child_token();
         let _cancel_tunnel = tunnel.clone().drop_guard();
 
+        let dial_start = Instant::now();
         let builder =
             match dial_builder(addr, &self.builder, self.cfg.builder_dial_timeout, &tunnel).await {
                 Ok(builder) => builder,
@@ -191,8 +193,9 @@ impl SshProxy {
             }
         };
 
+        self.metrics.builder_dialed(dial_start.elapsed());
         info!(builder_addr = %addr, "Connected to builder pod, tunnelling session");
-        let result = tunnel_session(client, channel, &tunnel, &self.cfg).await;
+        let result = tunnel_session(client, channel, &tunnel, &self.cfg, &self.metrics).await;
         // The builder connection lives until the tunnel is done.
         drop(builder);
         result
@@ -239,10 +242,11 @@ struct Shared {
     last_progress: Mutex<Instant>,
     /// No progress for this long counts as a stalled builder.
     stall_timeout: Duration,
+    metrics: Metrics,
 }
 
 impl Shared {
-    fn new(tunnel: CancellationToken, stall_timeout: Duration) -> Self {
+    fn new(tunnel: CancellationToken, stall_timeout: Duration, metrics: Metrics) -> Self {
         Self {
             tunnel,
             exit_status: Mutex::new(None),
@@ -253,6 +257,7 @@ impl Shared {
             input_room: Notify::new(),
             last_progress: Mutex::new(Instant::now()),
             stall_timeout,
+            metrics,
         }
     }
 
@@ -359,6 +364,7 @@ async fn tunnel_session(
     builder: Channel<client::Msg>,
     tunnel: &CancellationToken,
     cfg: &Config,
+    metrics: &Metrics,
 ) -> SessionResult {
     let client_close_grace = cfg.client_close_grace;
     let ClientSide {
@@ -368,7 +374,11 @@ async fn tunnel_session(
         ..
     } = client;
     let (builder_read, builder_write) = builder.split();
-    let shared = Arc::new(Shared::new(tunnel.clone(), cfg.input_stall_timeout));
+    let shared = Arc::new(Shared::new(
+        tunnel.clone(),
+        cfg.input_stall_timeout,
+        metrics.clone(),
+    ));
     let (input_tx, input_rx) = mpsc::unbounded_channel();
 
     let mut from_client: JoinHandle<ClientEnd> = tokio::spawn(read_client(
@@ -556,6 +566,7 @@ async fn write_builder(
                 let len = data.len();
                 stdin_bytes += len as u64;
                 let sent = builder.data_bytes(data).await;
+                shared.metrics.tunnelled(Direction::ClientToBuilder, len);
                 shared.input_written(len);
                 sent
             }
@@ -635,6 +646,7 @@ async fn write_builder(
                         let len = data.len();
                         stdin_bytes += len as u64;
                         let sent = builder.data_bytes(data).await;
+                        shared.metrics.tunnelled(Direction::ClientToBuilder, len);
                         shared.input_written(len);
                         sent
                     }
@@ -712,10 +724,16 @@ async fn builder_to_client(
             _ if broken => Ok(()),
             ChannelMsg::Data { data } => {
                 stdout_bytes += data.len() as u64;
+                shared
+                    .metrics
+                    .tunnelled(Direction::BuilderToClient, data.len());
                 shared.write_output(client.write.data_bytes(data)).await
             }
             ChannelMsg::ExtendedData { data, ext } => {
                 stderr_bytes += data.len() as u64;
+                shared
+                    .metrics
+                    .tunnelled(Direction::BuilderToClient, data.len());
                 shared
                     .write_output(client.write.extended_data_bytes(ext, data))
                     .await
@@ -956,6 +974,7 @@ mod tests {
         let shared = Arc::new(Shared::new(
             CancellationToken::new(),
             Duration::from_secs(60),
+            Metrics::new(&opentelemetry::global::meter("test")),
         ));
         shared.input_buffered.store(bytes, Ordering::SeqCst);
         shared

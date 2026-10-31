@@ -28,6 +28,7 @@ use common::http::HttpServer;
 use crate::auth::{ClientAuthorizer, fingerprint};
 use crate::config::Config;
 use crate::keys::{generate_host_key, load_private_key, private_key_from_secret};
+use crate::metrics::{Metrics, RejectReason};
 use crate::session::{Session, SessionResult};
 use crate::stream::CancellableStream;
 use crate::tunnel::{BuilderAuth, ClientSide};
@@ -44,6 +45,7 @@ pub struct SshProxy {
     pub(crate) cfg: Config,
     pub(crate) kube: Arc<dyn BuildRequestClient>,
     pub(crate) builder: BuilderAuth,
+    pub(crate) metrics: Metrics,
     listener: Mutex<Option<TcpListener>>,
     local_addr: SocketAddr,
     ssh_config: Arc<server::Config>,
@@ -69,6 +71,7 @@ impl SshProxy {
         builder_client_key: PrivateKey,
         client_auth: Option<ClientAuthorizer>,
         builder_host_key: Option<PublicKey>,
+        metrics: Metrics,
     ) -> anyhow::Result<Arc<Self>> {
         let cfg = cfg.with_defaults();
         let builder_keepalive =
@@ -133,6 +136,7 @@ impl SshProxy {
             },
             cfg,
             kube,
+            metrics,
             listener: Mutex::new(Some(listener)),
             local_addr,
             ssh_config: Arc::new(ssh_config),
@@ -150,6 +154,7 @@ impl SshProxy {
         host_key_path: Option<&Path>,
         ssh_key_secret: &str,
         client_authorized_keys_path: Option<&Path>,
+        metrics: Metrics,
     ) -> anyhow::Result<Arc<Self>> {
         let cfg = cfg.with_defaults();
         let client = Client::try_default()
@@ -245,6 +250,7 @@ impl SshProxy {
             builder_client_key,
             client_auth,
             builder_host_key,
+            metrics,
         )
         .await
     }
@@ -292,6 +298,7 @@ impl SshProxy {
                 () = shutdown.cancelled() => break,
                 accepted = listener.accept() => match accepted {
                     Ok((stream, peer)) => {
+                        self.metrics.connection_accepted();
                         let proxy = Arc::clone(self);
                         let force = force.clone();
                         connections.spawn(async move { proxy.handle_connection(stream, peer, force).await });
@@ -484,8 +491,10 @@ impl SshProxy {
             return None;
         }
         sessions.insert(id.to_string());
+        self.metrics.add_active_sessions(1);
         Some(SessionGuard {
             sessions: Arc::clone(&self.sessions),
+            metrics: self.metrics.clone(),
             id: id.to_string(),
         })
     }
@@ -511,9 +520,11 @@ impl SshProxy {
         self.finalize_build_request(&session, &result).await;
         drop(guard);
 
+        let elapsed = session.start.elapsed();
+        self.metrics.session_ended(result.outcome(), elapsed);
         info!(
             succeeded = result.err.is_none(),
-            duration = %duration::format(session.start.elapsed()),
+            duration = %duration::format(elapsed),
             "Build session closed"
         );
     }
@@ -541,7 +552,10 @@ impl SshProxy {
             .buffer_while(self.wait_for_builder_pod(session, conn_token))
             .await
         {
-            Some(Ok(ip)) => ip,
+            Some(Ok(ip)) => {
+                self.metrics.builder_ready(session.start.elapsed());
+                ip
+            }
             Some(Err(err)) => {
                 error!(error = %format!("{err:#}"), "Builder pod did not become ready");
                 client
@@ -565,6 +579,7 @@ impl SshProxy {
 /// Removes a session from the active set when dropped.
 struct SessionGuard {
     sessions: Arc<Mutex<HashSet<String>>>,
+    metrics: Metrics,
     id: String,
 }
 
@@ -574,6 +589,7 @@ impl Drop for SessionGuard {
             .lock()
             .expect("mutex poisoned")
             .remove(&self.id);
+        self.metrics.add_active_sessions(-1);
     }
 }
 
@@ -638,6 +654,7 @@ impl server::Handler for ConnHandler {
         if auth == Auth::Accept {
             self.client_key = Some(fp);
         } else {
+            self.proxy.metrics.auth_rejected();
             debug!(user, key = %fp, "Public key is not authorized");
         }
         Ok(auth)
@@ -662,6 +679,9 @@ impl server::Handler for ConnHandler {
     ) -> Result<(), Self::Error> {
         if self.proxy.draining.is_cancelled() {
             warn!(conn_id = %self.conn_id, "Rejecting session: proxy is shutting down");
+            self.proxy
+                .metrics
+                .session_rejected(RejectReason::ShuttingDown);
             reply
                 .reject(ChannelOpenFailure::AdministrativelyProhibited)
                 .await;
@@ -674,6 +694,9 @@ impl server::Handler for ConnHandler {
                 max_sessions = self.proxy.cfg.max_sessions,
                 "Rejecting session: concurrent session limit reached"
             );
+            self.proxy
+                .metrics
+                .session_rejected(RejectReason::SessionLimit);
             reply.reject(ChannelOpenFailure::ResourceShortage).await;
             return Ok(());
         };

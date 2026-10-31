@@ -4,148 +4,47 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use axum::http::header::CONTENT_TYPE;
 use futures::StreamExt;
 use k8s_openapi::api::core::v1::Pod;
 use kube::runtime::controller::{self, Action, Controller};
 use kube::runtime::reflector::ObjectRef;
 use kube::runtime::watcher;
 use kube::{Api, Client, ResourceExt};
-use prometheus::{
-    Histogram, HistogramOpts, IntCounter, IntCounterVec, IntGauge, Opts, Registry, TEXT_FORMAT,
-    TextEncoder,
-};
+use opentelemetry::KeyValue;
+use opentelemetry::metrics::UpDownCounter;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use api::{KubeControllerClient, NixBuildRequest};
 use common::duration;
 
-use crate::{LABEL_APP, LABEL_APP_VALUE, ReconcileAction, ReconcileError, Reconciler};
+use crate::{LABEL_APP, LABEL_APP_VALUE, Metrics, ReconcileAction, ReconcileError, Reconciler};
 
 /// Per-object retry backoff after a failed reconcile: 5ms doubling up to 1000s,
 /// reset on success.
 const BACKOFF_BASE: Duration = Duration::from_millis(5);
 const BACKOFF_MAX: Duration = Duration::from_secs(1000);
 
-/// Prometheus metrics for the controller.
-pub struct Metrics {
-    registry: Registry,
-    reconcile_total: IntCounterVec,
-    reconcile_errors: IntCounter,
-    reconcile_time: Histogram,
-    max_concurrent_reconciles: IntGauge,
-    active_workers: IntGauge,
-}
-
-impl Metrics {
-    /// Registers the controller metrics in a fresh registry.
-    pub fn new() -> Self {
-        let registry = Registry::new();
-        let reconcile_total = IntCounterVec::new(
-            Opts::new(
-                "nix_remote_build_controller_reconcile_total",
-                "Reconciles, by result",
-            ),
-            &["result"],
-        )
-        .expect("valid metric");
-        let reconcile_errors = IntCounter::with_opts(Opts::new(
-            "nix_remote_build_controller_reconcile_errors_total",
-            "Reconciles that failed and will be retried",
-        ))
-        .expect("valid metric");
-        let reconcile_time = Histogram::with_opts(
-            HistogramOpts::new(
-                "nix_remote_build_controller_reconcile_duration_seconds",
-                "Time taken by each reconcile",
-            )
-            .buckets(vec![
-                0.005, 0.01, 0.025, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.6,
-                0.7, 0.8, 0.9, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 6.0, 7.0,
-                8.0, 9.0, 10.0, 15.0, 20.0, 25.0, 30.0, 40.0, 50.0, 60.0,
-            ]),
-        )
-        .expect("valid metric");
-        let max_concurrent_reconciles = IntGauge::with_opts(Opts::new(
-            "nix_remote_build_controller_max_concurrent_reconciles",
-            "Reconciles allowed to run at the same time",
-        ))
-        .expect("valid metric");
-        let active_workers = IntGauge::with_opts(Opts::new(
-            "nix_remote_build_controller_active_reconciles",
-            "Reconciles running now",
-        ))
-        .expect("valid metric");
-        for collector in [
-            Box::new(reconcile_total.clone()) as Box<dyn prometheus::core::Collector>,
-            Box::new(reconcile_errors.clone()),
-            Box::new(reconcile_time.clone()),
-            Box::new(max_concurrent_reconciles.clone()),
-            Box::new(active_workers.clone()),
-        ] {
-            registry
-                .register(collector)
-                .expect("metric registered once");
-        }
-        Self {
-            registry,
-            reconcile_total,
-            reconcile_errors,
-            reconcile_time,
-            max_concurrent_reconciles,
-            active_workers,
-        }
-    }
-
-    /// Renders all metrics in the Prometheus text format.
-    pub fn render(&self) -> String {
-        TextEncoder::new()
-            .encode_to_string(&self.registry.gather())
-            .unwrap_or_else(|err| {
-                warn!(error = %err, "Failed to encode metrics");
-                String::new()
-            })
-    }
-
-    /// An HTTP router serving `/metrics`.
-    pub fn router(self: Arc<Self>) -> axum::Router {
-        axum::Router::new().route(
-            "/metrics",
-            axum::routing::get(move || {
-                let metrics = Arc::clone(&self);
-                async move { ([(CONTENT_TYPE, TEXT_FORMAT)], metrics.render()) }
-            }),
-        )
-    }
-}
-
-impl Default for Metrics {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 struct Context {
     reconciler: Reconciler<KubeControllerClient>,
-    metrics: Arc<Metrics>,
+    metrics: Metrics,
     /// Consecutive failures per object, for error backoff.
     failures: Mutex<HashMap<ObjectRef<NixBuildRequest>, u32>>,
 }
 
-/// Counts a reconcile in the active-workers gauge for as long as it lives.
-struct ActiveWorker<'gauge>(&'gauge IntGauge);
+/// Counts a reconcile as active for as long as it lives.
+struct ActiveWorker<'counter>(&'counter UpDownCounter<i64>);
 
-impl<'gauge> ActiveWorker<'gauge> {
-    fn start(gauge: &'gauge IntGauge) -> Self {
-        gauge.inc();
-        Self(gauge)
+impl<'counter> ActiveWorker<'counter> {
+    fn start(counter: &'counter UpDownCounter<i64>) -> Self {
+        counter.add(1, &[]);
+        Self(counter)
     }
 }
 
 impl Drop for ActiveWorker<'_> {
     fn drop(&mut self) {
-        self.0.dec();
+        self.0.add(-1, &[]);
     }
 }
 
@@ -165,14 +64,16 @@ async fn reconcile(obj: Arc<NixBuildRequest>, ctx: Arc<Context>) -> Result<Actio
     let result = ctx.reconciler.reconcile(&obj).await;
     metrics
         .reconcile_time
-        .observe(start.elapsed().as_secs_f64());
+        .record(start.elapsed().as_secs_f64(), &[]);
 
     let outcome = match &result {
         Ok(ReconcileAction::Requeue(_)) => "requeue_after",
         Ok(ReconcileAction::AwaitChange) => "success",
         Err(_) => "error",
     };
-    metrics.reconcile_total.with_label_values(&[outcome]).inc();
+    metrics
+        .reconcile_total
+        .add(1, &[KeyValue::new("result", outcome)]);
     match result {
         Ok(action) => {
             ctx.failures
@@ -182,7 +83,7 @@ async fn reconcile(obj: Arc<NixBuildRequest>, ctx: Arc<Context>) -> Result<Actio
             Ok(action.into())
         }
         Err(err) => {
-            metrics.reconcile_errors.inc();
+            metrics.reconcile_errors.add(1, &[]);
             Err(err)
         }
     }
@@ -219,7 +120,7 @@ pub struct Runner {
     /// Number of requests reconciled concurrently.
     pub workers: u16,
     /// Where reconcile metrics are recorded.
-    pub metrics: Arc<Metrics>,
+    pub metrics: Metrics,
     /// How long in-flight reconciles may run after shutdown is requested.
     pub shutdown_timeout: Duration,
 }
@@ -237,7 +138,11 @@ impl Runner {
             metrics,
             shutdown_timeout,
         } = self;
-        metrics.max_concurrent_reconciles.set(i64::from(workers));
+        metrics
+            .max_concurrent_reconciles
+            .record(i64::from(workers), &[]);
+        metrics.leader.record(1, &[]);
+        let leader = metrics.leader.clone();
         let ctx = Arc::new(Context {
             reconciler,
             metrics,
@@ -285,6 +190,7 @@ impl Runner {
                 "Timed out waiting for in-flight reconciles"
             ),
         }
+        leader.record(0, &[]);
     }
 }
 
@@ -299,18 +205,5 @@ mod tests {
         assert_eq!(backoff(3), Duration::from_millis(40));
         assert_eq!(backoff(30), BACKOFF_MAX);
         assert_eq!(backoff(u32::MAX), BACKOFF_MAX);
-    }
-
-    #[test]
-    fn metrics_render() {
-        let metrics = Metrics::new();
-        metrics
-            .reconcile_total
-            .with_label_values(&["success"])
-            .inc();
-        metrics.max_concurrent_reconciles.set(10);
-        let text = metrics.render();
-        assert!(text.contains("nix_remote_build_controller_reconcile_total{result=\"success\"} 1"));
-        assert!(text.contains("nix_remote_build_controller_max_concurrent_reconciles 10"));
     }
 }
