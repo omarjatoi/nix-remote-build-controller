@@ -2,8 +2,11 @@
   description = "Kubernetes controller for dynamically scaling Nix remote builders";
 
   inputs = {
-    nixpkgs.url = "github:nixos/nixpkgs?ref=nixos-unstable";
+    nixpkgs.url = "https://flakehub.com/f/NixOS/nixpkgs/0.1";
     flake-utils.url = "github:numtide/flake-utils";
+    # Builder pods run Determinate Nix, which exports OpenTelemetry traces. It
+    # keeps its own nixpkgs, so that its builds stay in the binary cache.
+    determinate-nix.url = "https://flakehub.com/f/DeterminateSystems/nix-src/*";
   };
 
   outputs =
@@ -11,6 +14,7 @@
       self,
       nixpkgs,
       flake-utils,
+      determinate-nix,
     }:
     flake-utils.lib.eachDefaultSystem (
       system:
@@ -185,7 +189,7 @@
             copyToRoot = pkgs.buildEnv {
               name = "builder-root";
               paths = [
-                pkgs.nix
+                determinate-nix.packages.${system}.nix-cli
                 pkgs.openssh
                 pkgs.coreutils
                 pkgs.bashInteractive
