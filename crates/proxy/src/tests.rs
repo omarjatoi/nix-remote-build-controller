@@ -886,7 +886,7 @@ async fn sessions_without_a_command_create_nothing() {
 async fn sessions_start_once_the_client_has_had_its_time() {
     let mut h = Harness::new(HarnessOpts {
         mode: ControllerMode::Never,
-        cfg: |c| c.handshake_timeout = Duration::from_millis(50),
+        cfg: |c| c.command_timeout = Duration::from_millis(50),
         ..Default::default()
     })
     .await;

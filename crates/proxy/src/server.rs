@@ -724,8 +724,7 @@ impl server::Handler for ConnHandler {
             // Clients name their trace in the environment, which is complete
             // once they ask for a command. A span's parent cannot change once
             // the span has started, so the session starts here.
-            let timeout = proxy.cfg.handshake_timeout;
-            if !client.wait_for_command(timeout).await {
+            if !client.wait_for_command(proxy.cfg.command_timeout).await {
                 debug!(conn_id = %conn_id, "Client closed a session without running anything");
                 client.writer().close().await;
                 return;

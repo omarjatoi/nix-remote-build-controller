@@ -32,6 +32,9 @@ pub struct Config {
     pub shutdown_timeout: Duration,
     /// Bounds the SSH handshake (including authentication) with a client.
     pub handshake_timeout: Duration,
+    /// How long a new session waits for the client to ask for a command, which
+    /// is when the trace to join is known. After that, the session starts anyway.
+    pub command_timeout: Duration,
     /// Bounds the TCP+SSH handshake with a builder pod, including retries
     /// while its sshd is still starting.
     pub builder_dial_timeout: Duration,
@@ -68,6 +71,8 @@ pub const DEFAULT_POD_READY_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 pub const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// Default for [`Config::handshake_timeout`].
 pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Default for [`Config::command_timeout`].
+pub const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 /// Default for [`Config::builder_dial_timeout`].
 pub const DEFAULT_BUILDER_DIAL_TIMEOUT: Duration = Duration::from_secs(15);
 /// Default for [`Config::poll_interval`].
@@ -96,6 +101,7 @@ impl Config {
         or(&mut self.pod_ready_timeout, DEFAULT_POD_READY_TIMEOUT);
         or(&mut self.shutdown_timeout, DEFAULT_SHUTDOWN_TIMEOUT);
         or(&mut self.handshake_timeout, DEFAULT_HANDSHAKE_TIMEOUT);
+        or(&mut self.command_timeout, DEFAULT_COMMAND_TIMEOUT);
         or(&mut self.builder_dial_timeout, DEFAULT_BUILDER_DIAL_TIMEOUT);
         or(&mut self.poll_interval, DEFAULT_POLL_INTERVAL);
         or(&mut self.client_close_grace, DEFAULT_CLIENT_CLOSE_GRACE);
@@ -126,6 +132,7 @@ mod tests {
         .with_defaults();
         assert_eq!(cfg.pod_ready_timeout, Duration::from_secs(1));
         assert_eq!(cfg.shutdown_timeout, DEFAULT_SHUTDOWN_TIMEOUT);
+        assert_eq!(cfg.command_timeout, DEFAULT_COMMAND_TIMEOUT);
         assert_eq!(cfg.remote_user, "nixbld");
         assert_eq!(cfg.remote_port, 22);
         assert_eq!(cfg.namespace, "default");
