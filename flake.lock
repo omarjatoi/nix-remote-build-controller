@@ -17,6 +17,20 @@
         "type": "github"
       }
     },
+    "crane": {
+      "locked": {
+        "lastModified": 1787326676,
+        "narHash": "sha256-lWhBbBvC05/xwivKBBiM2YNizpmgqCgyOIzomvRuwxs=",
+        "rev": "692f7e9ef2ece8125b466f66f2af532b3edaed0d",
+        "revCount": 891,
+        "type": "tarball",
+        "url": "https://api.flakehub.com/f/pinned/ipetkov/crane/0.24.0/01a024fa-8efd-7f73-ab14-d020d0f08bde/source.tar.gz"
+      },
+      "original": {
+        "type": "tarball",
+        "url": "https://flakehub.com/f/ipetkov/crane/%2A"
+      }
+    },
     "determinate-nix": {
       "inputs": {
         "bdwgc": "bdwgc",
@@ -176,6 +190,7 @@
     },
     "root": {
       "inputs": {
+        "crane": "crane",
         "determinate-nix": "determinate-nix",
         "flake-utils": "flake-utils",
         "nixpkgs": "nixpkgs_2"

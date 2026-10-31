@@ -4,6 +4,7 @@
   inputs = {
     nixpkgs.url = "https://flakehub.com/f/NixOS/nixpkgs/0.1";
     flake-utils.url = "github:numtide/flake-utils";
+    crane.url = "https://flakehub.com/f/ipetkov/crane/*";
     # Builder pods run Determinate Nix, which exports OpenTelemetry traces. It
     # keeps its own nixpkgs, so that its builds stay in the binary cache.
     determinate-nix.url = "https://flakehub.com/f/DeterminateSystems/nix-src/*";
@@ -14,6 +15,7 @@
       self,
       nixpkgs,
       flake-utils,
+      crane,
       determinate-nix,
     }:
     flake-utils.lib.eachDefaultSystem (
@@ -35,44 +37,38 @@
           ];
         };
 
-        # Build one of the workspace's programs (`controller` or `proxy`). Each
-        # is its own package, so only that program's dependencies are built.
+        craneLib = crane.mkLib pkgs;
+
+        crateArgs = {
+          pname = "nix-remote-build-controller";
+          inherit version;
+          src = rustSrc;
+          strictDeps = true;
+        };
+
+        # Dependencies are their own derivations, so a change to the workspace's
+        # code only rebuilds its crates. Tests and lints use the dev profile,
+        # which has debug assertions, and so need their own build.
+        releaseArtifacts = craneLib.buildDepsOnly crateArgs;
+        devArgs = crateArgs // {
+          CARGO_PROFILE = "dev";
+        };
+        devArtifacts = craneLib.buildDepsOnly devArgs;
+
+        # Build one of the workspace's programs (`controller` or `proxy`).
         buildRustApp =
           name:
-          pkgs.rustPlatform.buildRustPackage {
-            pname = name;
-            inherit version;
-            src = rustSrc;
-            cargoLock.lockFile = ./Cargo.lock;
-            cargoBuildFlags = [
-              "--package"
-              name
-            ];
-            # The test suite runs once, in `checks`, rather than per binary.
-            doCheck = false;
-            meta.mainProgram = name;
-          };
-
-        # A check that runs one cargo command against the vendored dependencies.
-        cargoCheck =
-          name: command:
-          pkgs.rustPlatform.buildRustPackage {
-            pname = "nix-remote-build-controller-${name}";
-            inherit version;
-            src = rustSrc;
-            cargoLock.lockFile = ./Cargo.lock;
-            nativeBuildInputs = [
-              pkgs.clippy
-              pkgs.rustfmt
-            ];
-            buildPhase = ''
-              runHook preBuild
-              ${command}
-              runHook postBuild
-            '';
-            doCheck = false;
-            installPhase = "touch $out";
-          };
+          craneLib.buildPackage (
+            crateArgs
+            // {
+              pname = name;
+              cargoArtifacts = releaseArtifacts;
+              cargoExtraArgs = "--locked --package ${name}";
+              # The test suite runs once, in `checks`, rather than per binary.
+              doCheck = false;
+              meta.mainProgram = name;
+            }
+          );
 
         # Build a container image for a given app
         buildImage =
@@ -225,13 +221,22 @@
 
         # `nix flake check` runs formatting, lints and the full test suite.
         checks = {
-          fmt = cargoCheck "fmt" "cargo fmt --check";
-          clippy = cargoCheck "clippy" "cargo clippy --all-targets --locked --offline -- -D warnings";
-          # The OTLP exporter needs a CA bundle, which the images have too.
-          tests = cargoCheck "tests" ''
-            export SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt
-            cargo test --locked --offline
-          '';
+          fmt = craneLib.cargoFmt { inherit (crateArgs) pname version src; };
+          clippy = craneLib.cargoClippy (
+            devArgs
+            // {
+              cargoArtifacts = devArtifacts;
+              cargoClippyExtraArgs = "--all-targets -- -D warnings";
+            }
+          );
+          tests = craneLib.cargoTest (
+            devArgs
+            // {
+              cargoArtifacts = devArtifacts;
+              # The OTLP exporter needs a CA bundle, which the images have too.
+              preBuild = "export SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
+            }
+          );
         };
 
         devShells.default = pkgs.mkShell {
