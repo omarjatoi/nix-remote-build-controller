@@ -10,6 +10,10 @@
 # HA=1 runs on a three-node cluster with two controller replicas using leader
 # election, and checks that a standby takes over when the leader pod is deleted.
 #
+# OTEL=1 adds an OpenTelemetry collector, and checks that the local Nix client,
+# the proxy, the controller and Nix on the builder pods all end up in one trace,
+# with both ssh:// and ssh-ng:// builders. It needs Determinate Nix on the client.
+#
 # Requires on PATH: kind, kubectl, docker, nix, jq, ssh, ssh-keygen, perl.
 set -euo pipefail
 
@@ -18,6 +22,7 @@ CLUSTER="nix-remote-build-e2e"
 NS="default"
 KEEP="${KEEP:-0}"
 HA="${HA:-0}"
+OTEL="${OTEL:-0}"
 LEASE="nix-remote-build-controller.nix.io"
 SLEEP_SECONDS="${SLEEP_SECONDS:-30}"
 PROXY_PORT="${PROXY_LOCAL_PORT:-2222}"
@@ -25,6 +30,7 @@ MARKER="e2e-$(date +%s)-$$"
 DAG="${REPO_ROOT}/test/e2e/dag.nix"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/nrbc-e2e.XXXXXX")"
 PF_PID=""
+OTEL_PF_PID=""
 WATCH_PID=""
 
 log()  { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
@@ -34,6 +40,7 @@ fail() { printf '\n\033[1;31mFAIL: %s\033[0m\n' "$*" >&2; exit 1; }
 cleanup() {
   local ec=$?
   [ -n "$PF_PID" ] && kill "$PF_PID" 2>/dev/null || true
+  [ -n "$OTEL_PF_PID" ] && kill "$OTEL_PF_PID" 2>/dev/null || true
   [ -n "$WATCH_PID" ] && kill "$WATCH_PID" 2>/dev/null || true
   if [ "$KEEP" = "1" ]; then
     info "KEEP=1 set; leaving cluster '$CLUSTER' and workdir $WORK"
@@ -56,6 +63,8 @@ done
 # the invoking user is always trusted for a store it created. The store must have
 # no symlink ancestors, so `pwd -P` resolves macOS's /var and /tmp symlinks.
 STORE="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/nrbc-store.XXXXXX")" && pwd -P)"
+[ "$HA" = "1" ] && [ "$OTEL" = "1" ] && fail "HA=1 and OTEL=1 cannot be combined"
+
 [ "$(nix store info --store "$STORE" --json 2>/dev/null | jq -r '.trusted // false')" = "true" ] ||
   fail "not trusted even in a private store; cannot honor --builders"
 
@@ -86,6 +95,48 @@ epoch() { date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$1" +%s 2>/dev/null || date -u -d 
 count() { kubectl -n "$NS" get "$@" --no-headers 2>/dev/null | wc -l | tr -d ' '; }
 # Run a command with a time limit (portable: macOS has no `timeout`).
 with_timeout() { local secs="$1"; shift; perl -e 'alarm shift; exec @ARGV' "$secs" "$@"; }
+# Prometheus metrics of a pod, read through the API server. Args: <pod>
+pod_metrics() { kubectl get --raw "/api/v1/namespaces/${NS}/pods/${1}:8082/proxy/metrics"; }
+# Name of the first pod of a component. Args: <component>
+pod_of() {
+  kubectl -n "$NS" get pods -l "component=$1" \
+    -o jsonpath='{.items[?(@.status.phase=="Running")].metadata.name}' | cut -d' ' -f1
+}
+# Fail unless a metric of a pod has a sample above zero. Args: <pod> <metric regex>
+want_metric() {
+  pod_metrics "$1" > "${WORK}/metrics"
+  grep -E "^$2" "${WORK}/metrics" | grep -vE ' 0$' >/dev/null || fail "$1 reports no $2"
+  info "PASS: $1 reports $2"
+}
+# What the collector has logged. Later greps read this file: `pipefail` would
+# fail a pipeline whose `grep -q` stopped reading early.
+collector_log() { kubectl -n "$NS" logs deploy/otel-collector --tail=-1 > "${WORK}/collector.log"; }
+# The spans the collector has received, one per line: service, trace ID, name.
+collector_spans() {
+  collector_log
+  awk '
+    /service\.name: Str\(/ { service = $0; sub(/.*Str\(/, "", service); sub(/\).*/, "", service) }
+    /^ *Trace ID +:/ { trace = $NF }
+    /^ *Name +:/ { name = $0; sub(/^ *Name +: /, "", name); print service, trace, name }' \
+    "${WORK}/collector.log"
+}
+# Print a trace that has all of the given "service span name" spans, waiting
+# for them to be exported.
+find_trace() {
+  local spans="${WORK}/spans" trace want missing
+  for _ in $(seq 1 60); do
+    collector_spans > "$spans"
+    while read -r trace; do
+      missing=0
+      for want in "$@"; do
+        grep -qF "${want%% *} $trace ${want#* }" "$spans" || missing=1
+      done
+      [ "$missing" = 0 ] && { echo "$trace"; return 0; }
+    done < <(awk '{print $2}' "$spans" | sort -u)
+    sleep 2
+  done
+  return 1
+}
 
 ########################################################################
 log "1/8 Building and loading images"
@@ -102,6 +153,7 @@ if [ "$HA" = "1" ]; then
 else
   KIND_CONFIG="${REPO_ROOT}/test/e2e/kind-config.yaml"
   MANIFESTS="${REPO_ROOT}/test/e2e/manifests"
+  [ "$OTEL" = "1" ] && MANIFESTS="${REPO_ROOT}/test/e2e/manifests-otel"
 fi
 kind create cluster --name "$CLUSTER" --config "$KIND_CONFIG" >/dev/null
 export KUBECONFIG="${WORK}/kubeconfig"
@@ -130,6 +182,13 @@ log "4/8 Deploying controller and proxy"
 kubectl apply -k "$MANIFESTS" >/dev/null
 kubectl -n "$NS" rollout status deploy/controller --timeout=120s
 kubectl -n "$NS" rollout status deploy/proxy --timeout=120s
+if [ "$OTEL" = "1" ]; then
+  kubectl -n "$NS" rollout status deploy/otel-collector --timeout=180s
+  kubectl -n "$NS" port-forward svc/otel-collector 4318:4318 >/dev/null 2>&1 &
+  OTEL_PF_PID=$!
+  # The local Nix client exports to the collector too.
+  export OTEL_EXPORTER_OTLP_ENDPOINT="http://127.0.0.1:4318"
+fi
 
 # The pod holding the controller's leader lease (empty if none).
 leader_pod() {
@@ -163,6 +222,7 @@ Host nrbc-proxy
   StrictHostKeyChecking no
   UserKnownHostsFile /dev/null
   LogLevel ERROR
+  SendEnv TRACEPARENT
 SSH
 export NIX_SSHOPTS="-F ${WORK}/ssh_config"
 
@@ -251,6 +311,64 @@ sessions=$(jq -rs '[.[].pods[]] | unique | length' "$POD_EVENTS")
 [ "${max_pods:-0}" -ge 2 ] || fail "expected >=2 concurrent builder pods, saw ${max_pods:-0}"
 [ "${sessions:-0}" -ge 3 ] || fail "expected >=3 distinct sessions, saw ${sessions:-0}"
 info "PASS: peak ${max_pods} builder pods across ${sessions} sessions"
+
+# Prometheus: both programs report the builds that just ran.
+PROXY_POD="$(pod_of proxy)"
+CONTROLLER_POD="${LEADER:-$(pod_of controller)}"
+want_metric "$PROXY_POD" 'nix_remote_build_proxy_sessions_total\{outcome="success"\}'
+want_metric "$PROXY_POD" 'nix_remote_build_proxy_tunnel_transferred_bytes_total\{direction="builder_to_client"\}'
+want_metric "$CONTROLLER_POD" 'nix_remote_build_controller_reconcile_total'
+want_metric "$CONTROLLER_POD" 'nix_remote_build_controller_builder_pods_created_total'
+want_metric "$CONTROLLER_POD" 'nix_remote_build_controller_leader'
+
+# OpenTelemetry: one build shows up as one trace across all the processes.
+if [ "$OTEL" = "1" ]; then
+  trace="$(find_trace 'nix nix build' \
+    'nix-remote-build-proxy session' \
+    'nix-remote-build-proxy tunnel' \
+    'nix-remote-build-controller reconcile' \
+    'nix-store nix-store')" || {
+    collector_spans | awk '{$2 = ""; print}' | sort | uniq -c | sort -rn | head -40
+    fail "no trace covers the client, proxy, controller and builder"
+  }
+  info "PASS: trace ${trace} covers the client, proxy, controller and builder"
+  grep -E "^nix-remote-build-controller $trace " "${WORK}/spans" | grep -v ' reconcile$' >/dev/null ||
+    fail "trace ${trace} has no Kubernetes API calls from the controller"
+  info "PASS: the trace shows the controller's Kubernetes API calls"
+
+  # ssh-ng:// builders run nix-daemon, which is told the trace in-band.
+  nix build --store "$STORE" --file "$DAG" a \
+    --arg nixpkgs "$NP" --argstr system "$BUILD_SYSTEM" --argstr marker "${MARKER}-ng" \
+    --argstr sleepSeconds 1 --max-jobs 0 --no-link -L --builders-use-substitutes \
+    --builders "ssh-ng://nixbld@nrbc-proxy ${BUILD_SYSTEM} - 100 1" 2> "${WORK}/ssh-ng.log" || {
+    cat "${WORK}/ssh-ng.log"
+    fail "build through an ssh-ng:// builder failed"
+  }
+  find_trace 'nix nix build' 'nix-remote-build-proxy session' 'nix-daemon daemon connection' >/dev/null ||
+    fail "no trace covers the client, proxy and daemon of an ssh-ng:// build"
+  info "PASS: ssh-ng:// builds are traced from the client to the builder's daemon"
+
+  for metric in nix_remote_build_proxy.sessions nix_remote_build_controller.reconcile; do
+    for i in $(seq 1 30); do
+      collector_log
+      grep -q "Name: ${metric}\$" "${WORK}/collector.log" && break
+      [ "$i" = 30 ] && fail "the collector received no ${metric} metric"
+      sleep 2
+    done
+  done
+  info "PASS: the collector received OTLP metrics"
+
+  grep -F 'Build session opened' "${WORK}/collector.log" >/dev/null ||
+    fail "the collector received no OTLP logs"
+  grep -F -A12 'Build session opened' "${WORK}/collector.log" |
+    grep -E 'Trace ID: [0-9a-f]{32}' >/dev/null || fail "OTLP logs are not tied to their trace"
+  info "PASS: the collector received OTLP logs tied to their traces"
+
+  kubectl -n "$NS" logs deploy/proxy > "${WORK}/proxy.log"
+  grep -F 'Build session opened' "${WORK}/proxy.log" | grep -F '"trace_id":' >/dev/null ||
+    fail "stderr logs carry no trace IDs"
+  info "PASS: stderr logs carry trace IDs"
+fi
 
 # Leader failover: delete the leader; the standby must take the lease and keep
 # reconciling (the failing build below needs a working controller).

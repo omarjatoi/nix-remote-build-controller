@@ -1,0 +1,65 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# OpenTelemetry overlay for the end-to-end test (OTEL=1). The collector logs
+# everything it receives, for the test to read.
+resources:
+  - ../manifests
+
+components:
+  - ../../../deploy/components/otel
+
+patches:
+  - target:
+      kind: ConfigMap
+      name: otel-collector
+    patch: |-
+      - op: replace
+        path: /data/config.yaml
+        value: |
+          receivers:
+            otlp:
+              protocols:
+                http:
+                  endpoint: 0.0.0.0:4318
+          processors:
+            batch:
+              timeout: 1s
+          exporters:
+            debug:
+              verbosity: detailed
+          service:
+            pipelines:
+              traces:
+                receivers: [otlp]
+                processors: [batch]
+                exporters: [debug]
+              metrics:
+                receivers: [otlp]
+                processors: [batch]
+                exporters: [debug]
+              logs:
+                receivers: [otlp]
+                processors: [batch]
+                exporters: [debug]
+  - target:
+      kind: Deployment
+      name: otel-collector
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/memory
+        value: 1Gi
+  # A short interval, so that metrics arrive before the test ends.
+  - target:
+      kind: Deployment
+      name: proxy
+    patch: &interval |-
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: OTEL_METRIC_EXPORT_INTERVAL
+          value: "2000"
+  - target:
+      kind: Deployment
+      name: controller
+    patch: *interval

@@ -50,6 +50,7 @@ patches:
         value:
           - --port=2222
           - --health-port=8080
+          - --metrics-addr=:8082
           - --namespace=default
           - --remote-user=nixbld
           - --remote-port=22
