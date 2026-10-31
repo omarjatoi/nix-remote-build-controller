@@ -1,0 +1,95 @@
+# Turns on everything that the default values leave off, so that `make validate`
+# and the flake check render all the templates. These are not real keys.
+imagePullSecrets:
+  - name: registry
+
+serviceAccount:
+  name: nrbc
+  annotations:
+    example.com/role: builder
+
+sshKeys:
+  create: true
+  private: |
+    -----BEGIN OPENSSH PRIVATE KEY-----
+    not-a-real-key
+    -----END OPENSSH PRIVATE KEY-----
+  public: ssh-ed25519 AAAA nixbld
+  builderHostKey: |
+    -----BEGIN OPENSSH PRIVATE KEY-----
+    not-a-real-key
+    -----END OPENSSH PRIVATE KEY-----
+  hostKey: |
+    -----BEGIN OPENSSH PRIVATE KEY-----
+    not-a-real-key
+    -----END OPENSSH PRIVATE KEY-----
+  clientAuthorizedKeys: |
+    ssh-ed25519 AAAA client
+
+telemetry:
+  otlpEndpoint: http://otel-collector:4318
+
+builder:
+  serviceAccountName: nix-builder
+
+controller:
+  replicaCount: 2
+  extraArgs:
+    - --remote-port=22
+  extraEnv:
+    - name: OTEL_LOGS_EXPORTER
+      value: none
+  podAnnotations:
+    example.com/team: nix
+  podLabels:
+    example.com/team: nix
+  nodeSelector:
+    kubernetes.io/os: linux
+  tolerations:
+    - key: dedicated
+      operator: Exists
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            topologyKey: kubernetes.io/hostname
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/component: controller
+
+proxy:
+  replicaCount: 2
+  strategy:
+    type: RollingUpdate
+  service:
+    type: LoadBalancer
+    nodePort: 30022
+    externalTrafficPolicy: Local
+    loadBalancerSourceRanges:
+      - 10.0.0.0/8
+    annotations:
+      example.com/internal: "true"
+  extraArgs:
+    - --remote-user=nixbld
+  extraEnv:
+    - name: OTEL_LOGS_EXPORTER
+      value: none
+  podAnnotations:
+    example.com/team: nix
+  podLabels:
+    example.com/team: nix
+  nodeSelector:
+    kubernetes.io/os: linux
+  tolerations:
+    - key: dedicated
+      operator: Exists
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            topologyKey: kubernetes.io/hostname
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/component: proxy

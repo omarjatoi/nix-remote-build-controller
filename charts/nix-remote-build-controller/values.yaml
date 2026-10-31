@@ -1,0 +1,165 @@
+# See docs/helm.md for a guide, and docs/configuration.md for what the flags do.
+
+nameOverride: ""
+fullnameOverride: ""
+
+# Pull secrets for the controller and proxy pods. Builder pods get theirs from
+# their service account (see builder.serviceAccountName).
+imagePullSecrets: []
+
+# The service account of the controller and proxy.
+serviceAccount:
+  create: true
+  # Default: the chart's full name.
+  name: ""
+  annotations: {}
+
+# Set to false if you manage the RBAC objects yourself. docs/helm.md lists them.
+rbac:
+  create: true
+
+# The secret with all SSH keys. See "SSH keys" in docs/helm.md.
+sshKeys:
+  # Name of the secret. By default you create it yourself, in the namespace of
+  # the release, so that the keys are not stored in the Helm release.
+  secretName: nix-builder-ssh-keys
+  # Create the secret from the values below. Then `private` and `public` are
+  # necessary. The others are optional, but use them; see "Security" in
+  # docs/deployment.md.
+  create: false
+  # Key that the proxy uses to log in to builder pods, and its public key.
+  private: ""
+  public: ""
+  # Host key of all builder pods. The proxy checks it.
+  builderHostKey: ""
+  # Host key of the proxy. Necessary with more than one proxy replica.
+  hostKey: ""
+  # Public keys of the clients that can connect. If empty, every client that can
+  # reach the proxy can connect.
+  clientAuthorizedKeys: ""
+
+# For the controller and proxy pods. Builder pods run sshd, which needs root.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+telemetry:
+  # Base URL of an OTLP/HTTP collector, for example http://otel-collector:4318.
+  # The controller, proxy and Nix on builder pods all send it their telemetry.
+  # For other OTEL_* settings, see extraEnv and docs/observability.md.
+  otlpEndpoint: ""
+
+builder:
+  image:
+    repository: ghcr.io/omarjatoi/nix-remote-build-controller/builder
+    # Default: the chart's appVersion.
+    tag: ""
+    pullPolicy: Always
+  # Service account of builder pods. Default: the namespace's default account.
+  serviceAccountName: ""
+  # Resources of each builder pod.
+  resources:
+    requests:
+      cpu: 1
+      memory: 2Gi
+    limits:
+      cpu: 4
+      memory: 8Gi
+  # nix.conf for every builder pod, mounted at /etc/nix. These settings apply to
+  # one pod. The number of pods comes from the client's maxJobs (see README.md).
+  nixConf: |
+    experimental-features = nix-command flakes
+    sandbox = false
+    trusted-users = root nixbld
+    # A pod builds one derivation at a time. Use cores to make it faster.
+    max-jobs = 1
+    # 0 means all CPU cores that the pod can use.
+    cores = 0
+    # Download cached dependencies in the pod, not through the client.
+    substituters = https://cache.nixos.org
+    builders-use-substitutes = true
+
+controller:
+  # With more than one replica, leader election is always on.
+  replicaCount: 1
+  leaderElect: false
+  image:
+    repository: ghcr.io/omarjatoi/nix-remote-build-controller/controller
+    # Default: the chart's appVersion.
+    tag: ""
+    pullPolicy: Always
+  maxConcurrentReconciles: 10
+  completedTtl: 10m
+  # After SIGTERM, time to finish the current work. The pod's termination grace
+  # period is 30 seconds longer.
+  shutdownTimeoutSeconds: 30
+  logLevel: info
+  # More flags and environment variables for the container.
+  extraArgs: []
+  extraEnv: []
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  podAnnotations: {}
+  podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+proxy:
+  # With more than one replica, set sshKeys' host key and use a RollingUpdate
+  # strategy. See "High availability" in docs/deployment.md.
+  replicaCount: 1
+  strategy:
+    type: Recreate
+  image:
+    repository: ghcr.io/omarjatoi/nix-remote-build-controller/proxy
+    # Default: the chart's appVersion.
+    tag: ""
+    pullPolicy: Always
+  service:
+    # The Nix clients connect to this service.
+    type: LoadBalancer
+    port: 22
+    # For NodePort and LoadBalancer services.
+    nodePort: null
+    externalTrafficPolicy: ""
+    # For LoadBalancer services: the client addresses that can connect.
+    loadBalancerSourceRanges: []
+    annotations: {}
+  podReadyTimeout: 5m
+  buildTimeout: 1h
+  # After SIGTERM, time that running builds can continue. The pod's termination
+  # grace period is 30 seconds longer.
+  shutdownTimeoutSeconds: 1800
+  keepaliveInterval: 30s
+  # Maximum number of builds at the same time (0 means no limit).
+  maxSessions: 0
+  logLevel: info
+  # More flags and environment variables for the container.
+  extraArgs: []
+  extraEnv: []
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  podAnnotations: {}
+  podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}

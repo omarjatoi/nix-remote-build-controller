@@ -1,0 +1,6 @@
+.DS_Store
+*.swp
+*.tmp
+*~
+# Values that only `make validate` and the flake check use.
+ci/

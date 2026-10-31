@@ -1,0 +1,114 @@
+{{- $component := dict "context" . "component" "proxy" -}}
+{{- if and .Values.sshKeys.create (not .Values.sshKeys.hostKey) (gt (int .Values.proxy.replicaCount) 1) -}}
+{{- fail "proxy.replicaCount is more than 1, so set sshKeys.hostKey. Otherwise each replica has its own host key, and clients see the key change." -}}
+{{- end -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "nrbc.fullname" . }}-proxy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nrbc.labels" $component | nindent 4 }}
+spec:
+  replicas: {{ .Values.proxy.replicaCount }}
+  strategy:
+    {{- toYaml .Values.proxy.strategy | nindent 4 }}
+  selector:
+    matchLabels:
+      {{- include "nrbc.selectorLabels" $component | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "nrbc.labels" $component | nindent 8 }}
+        {{- with .Values.proxy.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        {{- include "nrbc.prometheusAnnotations" . | nindent 8 }}
+        {{- with include "nrbc.sshKeysChecksum" . }}
+        {{- . | nindent 8 }}
+        {{- end }}
+        {{- with .Values.proxy.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "nrbc.serviceAccountName" . }}
+      # Lets running builds finish when the pod stops.
+      terminationGracePeriodSeconds: {{ add .Values.proxy.shutdownTimeoutSeconds 30 }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: proxy
+          image: {{ include "nrbc.image" (dict "context" . "image" .Values.proxy.image) | quote }}
+          imagePullPolicy: {{ .Values.proxy.image.pullPolicy }}
+          args:
+            - --port=2222
+            - --health-port=8080
+            - --metrics-addr=:8082
+            - "--namespace={{ .Release.Namespace }}"
+            - "--ssh-key-secret={{ .Values.sshKeys.secretName }}"
+            - "--pod-ready-timeout={{ .Values.proxy.podReadyTimeout }}"
+            - "--build-timeout={{ .Values.proxy.buildTimeout }}"
+            - "--shutdown-timeout={{ int .Values.proxy.shutdownTimeoutSeconds }}s"
+            - "--keepalive-interval={{ .Values.proxy.keepaliveInterval }}"
+            - "--max-sessions={{ .Values.proxy.maxSessions }}"
+            - "--log-level={{ .Values.proxy.logLevel }}"
+            {{- with .Values.proxy.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          env:
+            # Build requests point to this pod as their owner, so Kubernetes
+            # deletes them (and their builder pods) if this pod is deleted.
+            - name: PROXY_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: PROXY_POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            {{- with include "nrbc.telemetryEnv" . }}
+            {{- . | nindent 12 }}
+            {{- end }}
+            {{- with .Values.proxy.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - containerPort: 2222
+              name: ssh
+            - containerPort: 8080
+              name: health
+            - containerPort: 8082
+              name: metrics
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.proxy.resources | nindent 12 }}
+      {{- with .Values.proxy.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.proxy.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.proxy.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

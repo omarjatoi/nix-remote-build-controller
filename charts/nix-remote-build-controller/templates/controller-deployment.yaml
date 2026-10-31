@@ -1,0 +1,111 @@
+{{- $component := dict "context" . "component" "controller" -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "nrbc.fullname" . }}-controller
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nrbc.labels" $component | nindent 4 }}
+spec:
+  replicas: {{ .Values.controller.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "nrbc.selectorLabels" $component | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "nrbc.labels" $component | nindent 8 }}
+        {{- with .Values.controller.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        {{- include "nrbc.prometheusAnnotations" . | nindent 8 }}
+        {{- with include "nrbc.sshKeysChecksum" . }}
+        {{- . | nindent 8 }}
+        {{- end }}
+        {{- with .Values.controller.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "nrbc.serviceAccountName" . }}
+      terminationGracePeriodSeconds: {{ add .Values.controller.shutdownTimeoutSeconds 30 }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: controller
+          image: {{ include "nrbc.image" (dict "context" . "image" .Values.controller.image) | quote }}
+          imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
+          args:
+            - "--builder-image={{ include "nrbc.image" (dict "context" . "image" .Values.builder.image) }}"
+            - "--builder-image-pull-policy={{ .Values.builder.image.pullPolicy }}"
+            {{- with .Values.builder.serviceAccountName }}
+            - "--builder-service-account={{ . }}"
+            {{- end }}
+            {{- with .Values.builder.resources.requests }}
+            - "--builder-requests={{ include "nrbc.resourceFlag" . }}"
+            {{- end }}
+            {{- with .Values.builder.resources.limits }}
+            - "--builder-limits={{ include "nrbc.resourceFlag" . }}"
+            {{- end }}
+            - "--nix-config={{ include "nrbc.nixConfigName" . }}"
+            - "--ssh-key-secret={{ .Values.sshKeys.secretName }}"
+            - "--namespace={{ .Release.Namespace }}"
+            - "--max-concurrent-reconciles={{ .Values.controller.maxConcurrentReconciles }}"
+            - "--completed-ttl={{ .Values.controller.completedTtl }}"
+            - --health-port=8081
+            - --metrics-addr=:8082
+            - "--shutdown-timeout={{ int .Values.controller.shutdownTimeoutSeconds }}s"
+            - "--log-level={{ .Values.controller.logLevel }}"
+            {{- if include "nrbc.leaderElect" . }}
+            - --leader-elect
+            {{- end }}
+            {{- with .Values.controller.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- $telemetry := include "nrbc.telemetryEnv" . }}
+          {{- if or $telemetry .Values.controller.extraEnv }}
+          env:
+            {{- with $telemetry }}
+            {{- . | nindent 12 }}
+            {{- end }}
+            {{- with .Values.controller.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- end }}
+          ports:
+            - containerPort: 8081
+              name: health
+            - containerPort: 8082
+              name: metrics
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.controller.resources | nindent 12 }}
+      {{- with .Values.controller.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controller.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controller.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

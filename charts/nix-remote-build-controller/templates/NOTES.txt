@@ -1,0 +1,20 @@
+{{- $proxy := printf "%s-proxy" (include "nrbc.fullname" .) -}}
+{{- if not .Values.sshKeys.create }}
+The controller and proxy need the secret "{{ .Values.sshKeys.secretName }}" in the
+namespace "{{ .Release.Namespace }}". They do not start without it. To create it, see
+"SSH keys" in docs/helm.md.
+{{ else if not .Values.sshKeys.clientAuthorizedKeys }}
+WARNING: sshKeys.clientAuthorizedKeys is empty, so every client that can reach the
+proxy can start builder pods and run commands in them.
+{{ end }}
+Get the proxy address:
+{{ if eq .Values.proxy.service.type "LoadBalancer" }}
+  kubectl -n {{ .Release.Namespace }} get svc {{ $proxy }} \
+    -o jsonpath='{.status.loadBalancer.ingress[0]}'
+{{ else }}
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ $proxy }} 2222:{{ .Values.proxy.service.port }}
+{{ end }}
+Then point a Nix client to it. See "Configure the client" in docs/deployment.md.
+
+Install only one release in a cluster: the controller handles the build requests
+of all namespaces.
