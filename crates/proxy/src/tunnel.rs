@@ -869,7 +869,7 @@ impl client::Handler for BuilderHandler {
     ) -> Result<bool, Self::Error> {
         let Some(expected) = &self.expected else {
             // Pod-internal traffic without a configured builder host key; see
-            // the README's Security section.
+            // the Security section of docs/deployment.md.
             return Ok(true);
         };
         Ok(match key {

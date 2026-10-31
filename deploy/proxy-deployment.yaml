@@ -25,7 +25,7 @@ metadata:
 spec:
   replicas: 1
   # One proxy pod at a time. To run more replicas, see "High availability" in
-  # the README.
+  # docs/deployment.md.
   strategy:
     type: Recreate
   selector:
