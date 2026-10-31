@@ -37,6 +37,15 @@
           ];
         };
 
+        # The chart's CRD is a symbolic link to deploy/crd.yaml.
+        chartSrc = lib.fileset.toSource {
+          root = ./.;
+          fileset = lib.fileset.unions [
+            ./charts
+            ./deploy/crd.yaml
+          ];
+        };
+
         craneLib = crane.mkLib pkgs;
 
         crateArgs = {
@@ -237,6 +246,19 @@
               preBuild = "export SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
             }
           );
+          # Linting renders the templates, with both sets of values.
+          helm-chart =
+            pkgs.runCommand "helm-chart"
+              {
+                nativeBuildInputs = [ pkgs.kubernetes-helm ];
+              }
+              ''
+                export HOME=$TMPDIR
+                chart=${chartSrc}/charts/nix-remote-build-controller
+                helm lint --strict "$chart"
+                helm lint --strict "$chart" --values "$chart/ci/all-values.yaml"
+                touch $out
+              '';
         };
 
         devShells.default = pkgs.mkShell {
@@ -252,6 +274,7 @@
             kubectl
             kustomize
             kubeconform
+            kubernetes-helm
             shellcheck
             jq
           ];

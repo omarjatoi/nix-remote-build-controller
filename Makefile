@@ -3,6 +3,7 @@
 # (or `direnv allow`) first, or prefix a target with `nix develop -c`.
 
 CARGO ?= cargo
+CHART := charts/nix-remote-build-controller
 
 .PHONY: all build test lint fmt fmt-check check nixfmt \
         images manifests validate e2e clean help
@@ -38,6 +39,9 @@ validate: ## Validate rendered manifests against the Kubernetes schema
 	kustomize build deploy | kubeconform -strict -ignore-missing-schemas -summary
 	kustomize build test/e2e/manifests | kubeconform -strict -ignore-missing-schemas -summary
 	kustomize build test/e2e/manifests-otel | kubeconform -strict -ignore-missing-schemas -summary
+	helm lint --strict $(CHART)
+	helm template $(CHART) | kubeconform -strict -ignore-missing-schemas -summary
+	helm template $(CHART) --values $(CHART)/ci/all-values.yaml | kubeconform -strict -ignore-missing-schemas -summary
 
 e2e: ## Run the full Kind-based end-to-end test
 	bash test/e2e/run.sh
