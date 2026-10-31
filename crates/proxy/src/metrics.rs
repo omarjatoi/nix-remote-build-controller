@@ -88,6 +88,7 @@ pub struct Metrics {
 
 impl Metrics {
     /// Creates the instruments on `meter`.
+    #[must_use]
     pub fn new(meter: &Meter) -> Self {
         let metrics = Self {
             connections: meter
@@ -187,7 +188,7 @@ mod tests {
 
     #[test]
     fn metrics_render_under_their_prometheus_names() {
-        let provider = MetricsProvider::new().unwrap();
+        let provider = MetricsProvider::try_new().unwrap();
         let metrics = Metrics::new(&provider.meter());
         metrics.connection_accepted();
         metrics.auth_rejected();

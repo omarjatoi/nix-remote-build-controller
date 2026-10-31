@@ -741,7 +741,7 @@ impl server::Handler for ConnHandler {
                 otel.status_description = Empty,
             );
             if let Some(parent) = client.trace_context() {
-                parent.set_parent_of(&span);
+                parent.make_parent_of(&span);
             }
             proxy
                 .handle_channel(build, guard, client, conn_token)

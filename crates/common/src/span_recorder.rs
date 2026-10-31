@@ -9,6 +9,7 @@ use crate::telemetry;
 /// Sends the spans of the current thread through the production trace filter
 /// to memory, until dropped. This also covers tasks on the runtime of a
 /// `#[tokio::test]`, which run on the test's thread.
+#[must_use = "recording stops when this is dropped"]
 pub struct SpanRecorder {
     exporter: InMemorySpanExporter,
     provider: SdkTracerProvider,
@@ -18,7 +19,7 @@ pub struct SpanRecorder {
 
 impl SpanRecorder {
     /// Starts recording.
-    pub fn start() -> Self {
+    pub fn new() -> Self {
         use opentelemetry::trace::TracerProvider as _;
         use tracing_subscriber::Layer as _;
         use tracing_subscriber::layer::SubscriberExt as _;
@@ -45,8 +46,19 @@ impl SpanRecorder {
     }
 
     /// The spans that have ended so far.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the spans cannot be read, which fails the test.
+    #[must_use]
     pub fn finished_spans(&self) -> Vec<SpanData> {
         self.provider.force_flush().expect("flush spans");
         self.exporter.get_finished_spans().expect("read spans")
+    }
+}
+
+impl Default for SpanRecorder {
+    fn default() -> Self {
+        Self::new()
     }
 }

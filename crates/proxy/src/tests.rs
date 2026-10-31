@@ -771,7 +771,7 @@ async fn run_with_trace(h: &Harness) -> Output {
 
 #[tokio::test]
 async fn sessions_continue_the_trace_of_the_client() {
-    let recorder = SpanRecorder::start();
+    let recorder = SpanRecorder::new();
     let mut h = Harness::new(HarnessOpts::default()).await;
     let annotation = Arc::new(Mutex::new(None));
     let watcher = {
@@ -790,7 +790,7 @@ async fn sessions_continue_the_trace_of_the_client() {
         })
     };
     let out = run_with_trace(&h).await;
-    assert_eq!(out.exit_status, Some(0));
+    assert_eq!(out.exit_status, Some(0), "stderr: {}", out.stderr);
     assert_eq!(out.stdout, "HI\n");
     watcher.abort();
     h.stop().await.unwrap();
@@ -846,7 +846,7 @@ async fn sessions_continue_the_trace_of_the_client() {
 async fn trace_context_passes_through_when_the_proxy_is_not_tracing() {
     let mut h = Harness::new(HarnessOpts::default()).await;
     let out = run_with_trace(&h).await;
-    assert_eq!(out.exit_status, Some(0));
+    assert_eq!(out.exit_status, Some(0), "stderr: {}", out.stderr);
     h.stop().await.unwrap();
     let env = h.builder.stats.env.lock().unwrap().clone();
     assert_eq!(
@@ -869,13 +869,16 @@ async fn sessions_without_a_command_create_nothing() {
     let channel = client.channel_open_session().await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(h.requests().is_empty(), "no pod before a command");
-    assert_eq!(h.proxy.session_count(), 1);
+    assert_eq!(h.proxy.session_count(), 1, "the channel is a session");
     channel.close().await.unwrap();
     wait_until("the session to end", Duration::from_secs(5), || {
         h.proxy.session_count() == 0
     })
     .await;
-    assert!(h.requests().is_empty());
+    assert!(
+        h.requests().is_empty(),
+        "a session that ran nothing leaves no NixBuildRequest"
+    );
     h.stop().await.unwrap();
 }
 

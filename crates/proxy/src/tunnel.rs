@@ -94,6 +94,7 @@ impl ClientSide {
     /// if the client closes the channel (or its connection) first. A client
     /// that takes longer than `timeout`, or sends too much without asking, is
     /// no longer waited for.
+    #[must_use]
     pub(crate) async fn wait_for_command(&mut self, timeout: Duration) -> bool {
         let wait = async {
             while self.has_room() {
@@ -115,6 +116,7 @@ impl ClientSide {
 
     /// The trace the client asked to join, if any, among what it has sent so
     /// far.
+    #[must_use]
     pub(crate) fn trace_context(&self) -> Option<TraceContext> {
         self.pending.iter().find_map(|msg| match msg {
             ChannelMsg::SetEnv {

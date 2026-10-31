@@ -5,6 +5,7 @@ use std::fmt;
 use opentelemetry::Context;
 use tracing::level_filters::LevelFilter;
 use tracing::{Event, Subscriber};
+use tracing_subscriber::filter::Directive;
 use tracing_subscriber::fmt::format::{JsonFields, Writer};
 use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields};
 use tracing_subscriber::registry::LookupSpan;
@@ -55,11 +56,14 @@ pub(crate) fn filter(level: LevelFilter) -> EnvFilter {
         Ok(spec) if !spec.trim().is_empty() => EnvFilter::new(spec),
         _ => default_filter(level),
     };
-    filter.add_directive(
-        format!("{TRACE_ONLY_TARGET}=off")
-            .parse()
-            .expect("valid directive"),
-    )
+    filter.add_directive(off(TRACE_ONLY_TARGET))
+}
+
+/// A directive that filters out everything from `target`.
+pub(crate) fn off(target: &str) -> Directive {
+    format!("{target}=off")
+        .parse()
+        .expect("a target with a level is a valid directive")
 }
 
 /// Adds the current trace and span IDs to the JSON objects of another format,
@@ -118,10 +122,8 @@ mod tests {
     use std::io::Write;
     use std::sync::{Arc, Mutex};
 
-    use opentelemetry::trace::TracerProvider as _;
     use opentelemetry_sdk::trace::SdkTracerProvider;
     use tracing_subscriber::fmt::MakeWriter;
-    use tracing_subscriber::layer::SubscriberExt as _;
 
     use super::*;
 
@@ -189,6 +191,9 @@ mod tests {
 
     #[test]
     fn log_lines_carry_the_ids_of_their_trace() {
+        use opentelemetry::trace::TracerProvider as _;
+        use tracing_subscriber::layer::SubscriberExt as _;
+
         let buf = Buffer::default();
         let provider = SdkTracerProvider::builder().build();
         let format = tracing_subscriber::fmt::format().json().flatten_event(true);
@@ -223,6 +228,8 @@ mod tests {
     /// the span around them.
     #[test]
     fn log_lines_show_the_session_inside_trace_only_spans() {
+        use tracing_subscriber::layer::SubscriberExt as _;
+
         let buf = Buffer::default();
         let format = tracing_subscriber::fmt::format()
             .json()

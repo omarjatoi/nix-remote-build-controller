@@ -133,7 +133,7 @@ async fn main() -> ExitCode {
 }
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
-    let telemetry = Telemetry::init(SERVICE_NAME, VERSION, cli.log_level)?;
+    let telemetry = Telemetry::try_new(SERVICE_NAME, VERSION, cli.log_level)?;
     let result = serve(cli, &telemetry).await;
     if let Err(err) = &result {
         error!(error = %error::chain(err), "Controller failed");

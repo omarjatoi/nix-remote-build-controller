@@ -229,7 +229,7 @@ async fn pod_spec_honours_request_overrides() {
 async fn reconciles_join_the_trace_of_their_session() {
     const TRACE: &str = "0af7651916cd43dd8448eb211c80319c";
     const SESSION_SPAN: &str = "b7ad6b7169203331";
-    let recorder = SpanRecorder::start();
+    let recorder = SpanRecorder::new();
     let fake = FakeKube::new();
     let r = reconciler(&fake);
     let mut req = new_request("traced");
@@ -241,7 +241,7 @@ async fn reconciles_join_the_trace_of_their_session() {
     reconcile(&r, &fake, "build-traced").await;
 
     let spans = recorder.finished_spans();
-    assert_eq!(spans.len(), 1);
+    assert_eq!(spans.len(), 1, "one reconcile ran: {spans:?}");
     assert_eq!(spans[0].name, "reconcile");
     assert_eq!(spans[0].span_context.trace_id().to_string(), TRACE);
     assert_eq!(spans[0].parent_span_id.to_string(), SESSION_SPAN);

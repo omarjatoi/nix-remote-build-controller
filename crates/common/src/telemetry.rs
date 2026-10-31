@@ -69,7 +69,7 @@ impl OtlpSignals {
     /// variable. A signal is sent if `OTEL_EXPORTER_OTLP_ENDPOINT` or its own
     /// endpoint is set, unless its exporter is `none`. `OTEL_SDK_DISABLED`
     /// turns off all of them.
-    fn from_env(var: impl Fn(&str) -> Option<String>) -> Self {
+    fn new(var: impl Fn(&str) -> Option<String>) -> Self {
         let is_set = |name: &str| var(name).is_some_and(|value| !value.trim().is_empty());
         if var("OTEL_SDK_DISABLED").is_some_and(|v| v.trim().eq_ignore_ascii_case("true")) {
             return Self::default();
@@ -102,8 +102,8 @@ impl Telemetry {
     ///
     /// Fails if the OTLP settings are invalid. A collector that cannot be
     /// reached later on only loses telemetry.
-    pub fn init(service: &str, version: &str, level: LevelFilter) -> anyhow::Result<Self> {
-        let otlp = OtlpSignals::from_env(|name| std::env::var(name).ok());
+    pub fn try_new(service: &str, version: &str, level: LevelFilter) -> anyhow::Result<Self> {
+        let otlp = OtlpSignals::new(|name| std::env::var(name).ok());
         if otlp != OtlpSignals::default() {
             // There can be more than one caller; all ask for the same provider.
             let _ = rustls::crypto::ring::default_provider().install_default();
@@ -126,7 +126,7 @@ impl Telemetry {
         } else {
             None
         };
-        let metrics = MetricsProvider::with_otlp(resource, metric_exporter)?;
+        let metrics = MetricsProvider::try_new_with_otlp(resource, metric_exporter)?;
 
         let trace_layer = tracer_provider.as_ref().map(|provider| {
             use opentelemetry::trace::TracerProvider as _;
@@ -160,6 +160,7 @@ impl Telemetry {
     }
 
     /// The metrics pipeline.
+    #[must_use]
     pub fn metrics(&self) -> &MetricsProvider {
         &self.metrics
     }
@@ -211,7 +212,7 @@ fn logger_provider(resource: Resource) -> anyhow::Result<SdkLoggerProvider> {
 fn log_filter(level: LevelFilter) -> EnvFilter {
     let mut filter = logging::filter(level);
     for name in EXPORT_CRATES {
-        filter = filter.add_directive(format!("{name}=off").parse().expect("valid directive"));
+        filter = filter.add_directive(logging::off(name));
     }
     filter
 }
@@ -244,13 +245,14 @@ mod tests {
     use std::collections::HashMap;
 
     use opentelemetry::trace::Status;
+    use tracing::field::Empty;
 
     use super::*;
     use crate::SpanRecorder;
 
     fn signals(vars: &[(&str, &str)]) -> OtlpSignals {
         let vars: HashMap<&str, &str> = vars.iter().copied().collect();
-        OtlpSignals::from_env(|name| vars.get(name).map(ToString::to_string))
+        OtlpSignals::new(|name| vars.get(name).map(ToString::to_string))
     }
 
     #[test]
@@ -313,7 +315,7 @@ mod tests {
 
     #[test]
     fn only_kubernetes_calls_of_reconciles_are_traced() {
-        let recorder = SpanRecorder::start();
+        let recorder = SpanRecorder::new();
         tracing::debug_span!(target: "kube_client::client::builder", "lease renewal")
             .in_scope(|| {});
         tracing::info_span!(target: "russh::client", "from a dependency").in_scope(|| {});
@@ -333,11 +335,11 @@ mod tests {
 
     #[test]
     fn errors_mark_spans_as_failed() {
-        let recorder = SpanRecorder::start();
+        let recorder = SpanRecorder::new();
         let span = tracing::error_span!(
             "session",
-            otel.status_code = tracing::field::Empty,
-            otel.status_description = tracing::field::Empty,
+            otel.status_code = Empty,
+            otel.status_description = Empty,
         );
         span.in_scope(|| {});
         record_error(&span, "builder went away");

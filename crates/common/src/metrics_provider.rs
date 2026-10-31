@@ -2,6 +2,7 @@
 //! configured, an OTLP exporter.
 
 use anyhow::Context as _;
+use axum::Router;
 use axum::http::header::CONTENT_TYPE;
 use opentelemetry::metrics::Meter;
 use opentelemetry_otlp::MetricExporter;
@@ -23,13 +24,16 @@ pub struct MetricsProvider {
 
 impl MetricsProvider {
     /// A provider that only serves Prometheus metrics.
-    pub fn new() -> anyhow::Result<Self> {
-        Self::with_otlp(Resource::builder().build(), None)
+    pub fn try_new() -> anyhow::Result<Self> {
+        Self::try_new_with_otlp(Resource::builder().build(), None)
     }
 
     /// A provider that also sends metrics to `otlp`, if given. `resource`
     /// describes this process in those metrics.
-    pub fn with_otlp(resource: Resource, otlp: Option<MetricExporter>) -> anyhow::Result<Self> {
+    pub fn try_new_with_otlp(
+        resource: Resource,
+        otlp: Option<MetricExporter>,
+    ) -> anyhow::Result<Self> {
         let registry = Registry::new();
         let prometheus = opentelemetry_prometheus::exporter()
             .with_registry(registry.clone())
@@ -50,12 +54,14 @@ impl MetricsProvider {
     }
 
     /// The meter for this program's instruments.
+    #[must_use]
     pub fn meter(&self) -> Meter {
         use opentelemetry::metrics::MeterProvider as _;
         self.provider.meter(METER_NAME)
     }
 
     /// Renders all metrics in the Prometheus text format.
+    #[must_use]
     pub fn render(&self) -> String {
         render(&self.registry)
     }
@@ -68,7 +74,7 @@ impl MetricsProvider {
         }
         let listener = http::bind(addr).await.context("listen metrics server")?;
         let registry = self.registry.clone();
-        let router = axum::Router::new().route(
+        let router = Router::new().route(
             "/metrics",
             axum::routing::get(move || {
                 let registry = registry.clone();
@@ -98,12 +104,13 @@ fn render(registry: &Registry) -> String {
 #[cfg(test)]
 mod tests {
     use opentelemetry::KeyValue;
+    use tokio::net::TcpStream;
 
     use super::*;
 
     #[test]
     fn instruments_keep_their_prometheus_names() {
-        let provider = MetricsProvider::new().unwrap();
+        let provider = MetricsProvider::try_new().unwrap();
         let meter = provider.meter();
         meter
             .u64_counter("test.requests")
@@ -138,7 +145,7 @@ mod tests {
 
     #[tokio::test]
     async fn serves_metrics_over_http() {
-        let provider = MetricsProvider::new().unwrap();
+        let provider = MetricsProvider::try_new().unwrap();
         provider
             .meter()
             .u64_counter("test.requests")
@@ -153,9 +160,7 @@ mod tests {
             .unwrap()
             .expect("server");
         let port = server.local_addr().port();
-        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
-            .await
-            .unwrap();
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
         stream
             .write_all(b"GET /metrics HTTP/1.1\r\nhost: x\r\nconnection: close\r\n\r\n")

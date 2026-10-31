@@ -82,6 +82,7 @@ impl SessionResult {
     }
 
     /// The session's outcome for the metrics.
+    #[must_use]
     pub(crate) fn outcome(&self) -> SessionOutcome {
         match (&self.err, self.exit_status) {
             (Some(_), _) => SessionOutcome::Error,
@@ -118,7 +119,7 @@ impl SshProxy {
         if seconds > 0 {
             req.spec.timeout_seconds = Some(seconds);
         }
-        let mut annotations = BTreeMap::new();
+        let mut annotations: BTreeMap<String, String> = BTreeMap::new();
         if let Some(context) = &session.trace_context {
             annotations.insert(
                 api::ANNOTATION_TRACEPARENT.to_string(),

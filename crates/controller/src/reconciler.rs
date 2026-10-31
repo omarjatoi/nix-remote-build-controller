@@ -144,7 +144,7 @@ impl<C: ControllerClient> Reconciler<C> {
             otel.status_description = Empty,
         );
         if let Some(parent) = trace_parent(req) {
-            parent.set_parent_of(&span);
+            parent.make_parent_of(&span);
         }
         let result = self
             .reconcile_inner(req, phase)
