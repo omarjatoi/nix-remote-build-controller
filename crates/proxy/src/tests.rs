@@ -190,9 +190,13 @@ impl server::Handler for BuilderConn {
     async fn exec_request(
         &mut self,
         channel: ChannelId,
-        _data: &[u8],
+        data: &[u8],
         session: &mut server::Session,
     ) -> Result<(), Self::Error> {
+        // Like an sshd whose ForceCommand or policy refuses the command.
+        if data == b"refused" {
+            return session.channel_failure(channel);
+        }
         session.channel_success(channel)
     }
 
@@ -808,6 +812,23 @@ async fn large_payloads_survive_flow_control() {
 }
 
 #[tokio::test]
+async fn refused_command_is_reported_to_client() {
+    let mut h = Harness::new(HarnessOpts::default()).await;
+    let client = h.dial().await;
+    // The proxy accepts the exec at once; the builder's refusal comes later
+    // and must still reach the client.
+    let out = run_command(&client, "refused", "").await;
+    assert_eq!(out.exit_status, Some(255), "{out:?}");
+    assert!(
+        out.stderr.contains("builder pod rejected the exec request"),
+        "{out:?}"
+    );
+    drop(client);
+    h.wait_no_requests().await;
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn lost_builder_connection_is_reported_to_client() {
     let mut h = Harness::new(HarnessOpts::default()).await;
     let client = h.dial().await;
@@ -1067,10 +1088,12 @@ async fn client_leaving_a_stalled_builder_ends_the_session() {
             // session for the wrong reason.
             c.builder_keepalive_interval = Duration::ZERO;
             // The client closes with unread data, so its kernel resets the
-            // connection instead of closing it. Under heavy parallel load on
-            // macOS that reset sometimes never reaches the proxy, which is
-            // left waiting on an empty socket. As in production, a TCP
-            // keepalive then finds the client gone.
+            // connection instead of closing it. On macOS, when the client is
+            // still sending at that moment, the proxy's socket sometimes
+            // never learns of the reset and waits on it forever; Linux always
+            // delivers it. The stalled builder gives the proxy nothing to
+            // send that would draw a fresh reset, so, as in production, a TCP
+            // keepalive finds the client gone.
             c.client_keepalive_interval = Duration::from_secs(1);
         },
         ..Default::default()

@@ -383,6 +383,47 @@ async fn pod_failure_marks_request_failed() {
 }
 
 #[tokio::test]
+async fn pod_that_ends_before_it_is_ready_fails_the_request() {
+    let fake = FakeKube::new();
+    let r = reconciler(&fake);
+    for session in ["exited", "gone"] {
+        fake.insert_request(with_finalizer(new_request(session)));
+        reconcile(&r, &fake, &format!("build-{session}")).await; // -> Creating
+    }
+    fake.set_pod_status(
+        NS,
+        "nix-builder-exited",
+        PodStatus {
+            phase: Some("Succeeded".into()),
+            ..Default::default()
+        },
+    );
+    fake.delete_pod(NS, "nix-builder-gone").await.unwrap();
+
+    for (session, reason, message) in [
+        (
+            "exited",
+            "PodExited",
+            "Builder pod exited before it became ready",
+        ),
+        (
+            "gone",
+            "PodMissing",
+            "Builder pod was deleted before it became ready",
+        ),
+    ] {
+        let name = format!("build-{session}");
+        let action = reconcile(&r, &fake, &name).await;
+        assert_eq!(action, ReconcileAction::Requeue(Duration::from_secs(60)));
+        let st = status(&fake, &name);
+        assert_eq!(st.phase, Some(BuildPhase::Failed), "{session}");
+        assert_eq!(st.message, message);
+        assert!(st.completion_time.is_some());
+        assert!(fake.events().iter().any(|e| e.reason == reason));
+    }
+}
+
+#[tokio::test]
 async fn pod_that_exits_while_running_completes_the_request() {
     let fake = FakeKube::new();
     let mut req = with_finalizer(new_request("done"));
