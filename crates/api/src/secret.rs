@@ -18,6 +18,7 @@ pub const BUILDER_HOST_KEY: &str = "builder-host-key";
 pub const CLIENT_AUTHORIZED_KEYS: &str = "client-authorized-keys";
 
 /// The bytes of a secret entry, or `None` when it is absent or empty.
+#[must_use]
 pub fn entry<'a>(secret: &'a Secret, key: &str) -> Option<&'a [u8]> {
     secret
         .data

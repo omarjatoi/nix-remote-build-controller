@@ -86,6 +86,7 @@ pub const DEFAULT_NAMESPACE: &str = "default";
 impl Config {
     /// Fills in defaults for zero-valued fields. The keepalive intervals,
     /// `build_timeout` and `max_sessions` keep zero, which means "disabled".
+    #[must_use]
     pub fn with_defaults(mut self) -> Self {
         fn or(d: &mut Duration, default: Duration) {
             if d.is_zero() {

@@ -82,6 +82,7 @@ impl HttpServer {
     }
 
     /// The address the server is bound to.
+    #[must_use]
     pub fn local_addr(&self) -> SocketAddr {
         self.addr
     }

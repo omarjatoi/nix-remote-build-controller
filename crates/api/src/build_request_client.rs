@@ -32,6 +32,7 @@ pub struct KubeBuildRequestClient {
 
 impl KubeBuildRequestClient {
     /// Wraps a Kubernetes client.
+    #[must_use]
     pub fn new(client: Client) -> Self {
         Self { client }
     }

@@ -116,6 +116,7 @@ pub enum BuildPhase {
 
 impl BuildPhase {
     /// The phase as written in the API.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             BuildPhase::Pending => "Pending",
@@ -161,6 +162,7 @@ pub struct BuildCondition {
 }
 
 /// The current time as a Kubernetes timestamp.
+#[must_use]
 pub fn now() -> Time {
     Time(k8s_openapi::jiff::Timestamp::now())
 }

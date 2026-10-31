@@ -38,6 +38,7 @@ pub struct LeaderElectionConfig {
 
 impl LeaderElectionConfig {
     /// Defaults: 15s lease, 10s renew deadline, 2s retry.
+    #[must_use]
     pub fn new(namespace: &str, name: &str, identity: &str) -> Self {
         Self {
             namespace: namespace.to_string(),
@@ -83,6 +84,7 @@ pub struct LeaderElector {
 
 impl LeaderElector {
     /// Creates an elector for the lease described by `cfg`.
+    #[must_use]
     pub fn new(client: Client, cfg: LeaderElectionConfig) -> Self {
         Self {
             api: Api::namespaced(client, &cfg.namespace),

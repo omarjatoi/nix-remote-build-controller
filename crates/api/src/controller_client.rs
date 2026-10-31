@@ -54,6 +54,7 @@ pub struct KubeControllerClient {
 
 impl KubeControllerClient {
     /// Creates a client; events are reported as `reporter`.
+    #[must_use]
     pub fn new(client: Client, reporter: Reporter) -> Self {
         let recorder = Recorder::new(client.clone(), reporter);
         Self { client, recorder }

@@ -163,7 +163,7 @@ async fn serve(cli: Cli, telemetry: &Telemetry) -> anyhow::Result<()> {
     let metrics_server = telemetry.metrics().serve(&cli.metrics_addr).await?;
     let host_key = optional_path(&cli.host_key);
     let client_keys = optional_path(&cli.client_authorized_keys);
-    let ssh_proxy = SshProxy::from_cluster(
+    let ssh_proxy = SshProxy::try_new_from_cluster(
         config(&cli),
         host_key.as_deref(),
         &cli.ssh_key_secret,

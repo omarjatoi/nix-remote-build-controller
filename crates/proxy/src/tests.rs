@@ -470,7 +470,7 @@ impl Harness {
         };
         (opts.cfg)(&mut cfg);
 
-        let proxy = SshProxy::new(
+        let proxy = SshProxy::try_new(
             cfg,
             Arc::new(fake.clone()),
             key(),

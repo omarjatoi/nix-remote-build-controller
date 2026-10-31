@@ -95,6 +95,7 @@ pub fn parse(input: &str) -> Result<Duration, ParseDurationError> {
 }
 
 /// Formats a duration for logs, for example `1h30m0s` or `250ms`.
+#[must_use]
 pub fn format(d: Duration) -> String {
     let nanos = d.as_nanos();
     if nanos == 0 {

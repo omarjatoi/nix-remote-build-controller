@@ -65,7 +65,7 @@ impl SshProxy {
     /// client may connect, which is only acceptable when network policy
     /// restricts who can reach the proxy. Without `builder_host_key` any
     /// builder host key is accepted.
-    pub async fn new(
+    pub async fn try_new(
         cfg: Config,
         kube: Arc<dyn BuildRequestClient>,
         host_key: PrivateKey,
@@ -150,7 +150,7 @@ impl SshProxy {
 
     /// Creates a proxy using in-cluster (or kubeconfig) credentials, loading
     /// all key material from the SSH key secret unless overridden by files.
-    pub async fn from_cluster(
+    pub async fn try_new_from_cluster(
         cfg: Config,
         host_key_path: Option<&Path>,
         ssh_key_secret: &str,
@@ -244,7 +244,7 @@ impl SshProxy {
             None
         };
 
-        Self::new(
+        Self::try_new(
             cfg,
             Arc::new(KubeBuildRequestClient::new(client)),
             host_key,

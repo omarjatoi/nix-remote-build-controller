@@ -47,6 +47,7 @@ pub struct Session {
 
 impl Session {
     /// A new session with a fresh, time-ordered ID.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             id: uuid::Uuid::now_v7().to_string(),
@@ -74,6 +75,7 @@ pub struct SessionResult {
 
 impl SessionResult {
     /// A session that failed with `err`.
+    #[must_use]
     pub fn failed(err: anyhow::Error) -> Self {
         Self {
             exit_status: None,
@@ -93,6 +95,7 @@ impl SessionResult {
 }
 
 /// The `NixBuildRequest` name for a session.
+#[must_use]
 pub fn build_request_name(session_id: &str) -> String {
     format!("build-{session_id}")
 }

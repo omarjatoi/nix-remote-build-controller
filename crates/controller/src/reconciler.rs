@@ -61,6 +61,7 @@ pub enum ReconcileAction {
 
 impl ReconcileAction {
     /// The requeue delay, if any.
+    #[must_use]
     pub fn requeue_after(self) -> Option<Duration> {
         match self {
             Self::Requeue(after) => Some(after),
@@ -628,6 +629,7 @@ impl<C: ControllerClient> Reconciler<C> {
 }
 
 /// The deterministic builder pod name for a request.
+#[must_use]
 pub fn builder_pod_name(req: &NixBuildRequest) -> String {
     format!("nix-builder-{}", req.spec.session_id)
 }

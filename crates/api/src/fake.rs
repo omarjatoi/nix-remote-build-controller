@@ -94,6 +94,7 @@ fn merge_patch(target: &mut serde_json::Value, patch: &serde_json::Value) {
 
 impl FakeKube {
     /// An empty API.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -126,11 +127,13 @@ impl FakeKube {
     }
 
     /// Reads a request.
+    #[must_use]
     pub fn request(&self, namespace: &str, name: &str) -> Option<NixBuildRequest> {
         self.state().requests.get(&key(namespace, name)).cloned()
     }
 
     /// All requests in a namespace.
+    #[must_use]
     pub fn requests(&self, namespace: &str) -> Vec<NixBuildRequest> {
         self.state()
             .requests
@@ -141,6 +144,7 @@ impl FakeKube {
     }
 
     /// Reads a pod.
+    #[must_use]
     pub fn pod(&self, namespace: &str, name: &str) -> Option<Pod> {
         self.state().pods.get(&key(namespace, name)).cloned()
     }
@@ -193,6 +197,7 @@ impl FakeKube {
     }
 
     /// Events published so far, oldest first.
+    #[must_use]
     pub fn events(&self) -> Vec<BuildEvent> {
         self.state().events.clone()
     }
