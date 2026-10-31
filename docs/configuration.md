@@ -45,8 +45,9 @@ Both programs write JSON logs to stderr. If `RUST_LOG` is set, it replaces
 
 ## Builder Nix settings
 
-`deploy/nix-config.yaml` holds the `nix.conf` for builder pods. Each pod builds
-one derivation, so use `cores` (not `max-jobs`) to make one build faster.
+`deploy/nix-config.yaml` holds the `nix.conf` for builder pods. With the Helm
+chart, use `builder.nixConf`. Each pod builds one derivation, so use `cores` (not
+`max-jobs`) to make one build faster.
 
 ## NixBuildRequest
 

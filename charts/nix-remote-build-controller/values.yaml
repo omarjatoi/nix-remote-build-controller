@@ -14,7 +14,8 @@ serviceAccount:
   name: ""
   annotations: {}
 
-# Set to false if you manage the RBAC objects yourself. docs/helm.md lists them.
+# Set to false if you manage the RBAC objects yourself. templates/rbac.yaml has
+# the rules that the service account needs.
 rbac:
   create: true
 

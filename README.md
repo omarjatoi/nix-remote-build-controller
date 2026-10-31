@@ -70,6 +70,7 @@ Do not confuse `maxJobs` with these settings:
 ## Documentation
 
 - [Deployment](docs/deployment.md): quick start, security and high availability.
+- [Helm](docs/helm.md): installing and configuring the Helm chart.
 - [Configuration](docs/configuration.md): flags, builder Nix settings and the
   `NixBuildRequest` resource.
 - [Observability](docs/observability.md): traces, logs and metrics with

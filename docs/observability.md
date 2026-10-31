@@ -15,6 +15,9 @@ components:
 The collector only logs a summary of what it receives. Replace its `debug`
 exporter with your backend.
 
+The Helm chart does not install a collector. To connect everything to your own,
+see [Telemetry](helm.md#telemetry).
+
 ## Traces
 
 Each build session is a trace. The proxy's `session` span contains its steps:
