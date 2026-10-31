@@ -35,9 +35,12 @@ pub struct Config {
     /// Bounds the TCP+SSH handshake with a builder pod, including retries
     /// while its sshd is still starting.
     pub builder_dial_timeout: Duration,
-    /// Keepalive interval: TCP keepalives towards clients, SSH keepalive
-    /// requests towards builders. Zero disables keepalives.
-    pub keepalive_interval: Duration,
+    /// Interval of TCP keepalives towards clients, which find clients that
+    /// went away without closing their connection. Zero disables them.
+    pub client_keepalive_interval: Duration,
+    /// Interval of SSH keepalive requests towards builders. A builder that
+    /// misses one is considered gone. Zero disables them.
+    pub builder_keepalive_interval: Duration,
     /// How often the `NixBuildRequest` status is polled while waiting for the
     /// builder pod.
     pub poll_interval: Duration,
@@ -81,7 +84,7 @@ pub const DEFAULT_REMOTE_PORT: u16 = 22;
 pub const DEFAULT_NAMESPACE: &str = "default";
 
 impl Config {
-    /// Fills in defaults for zero-valued fields. `keepalive_interval`,
+    /// Fills in defaults for zero-valued fields. The keepalive intervals,
     /// `build_timeout` and `max_sessions` keep zero, which means "disabled".
     pub fn with_defaults(mut self) -> Self {
         fn or(d: &mut Duration, default: Duration) {
@@ -125,7 +128,8 @@ mod tests {
         assert_eq!(cfg.remote_user, "nixbld");
         assert_eq!(cfg.remote_port, 22);
         assert_eq!(cfg.namespace, "default");
-        assert!(cfg.keepalive_interval.is_zero());
+        assert!(cfg.client_keepalive_interval.is_zero());
+        assert!(cfg.builder_keepalive_interval.is_zero());
         assert!(cfg.build_timeout.is_zero());
         assert_eq!(cfg.max_sessions, 0);
     }

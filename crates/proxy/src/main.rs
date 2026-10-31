@@ -128,7 +128,8 @@ fn config(cli: &Cli) -> proxy::Config {
         pod_ready_timeout: cli.pod_ready_timeout,
         build_timeout: cli.build_timeout,
         shutdown_timeout: cli.shutdown_timeout,
-        keepalive_interval: cli.keepalive_interval,
+        client_keepalive_interval: cli.keepalive_interval,
+        builder_keepalive_interval: cli.keepalive_interval,
         max_sessions: usize::try_from(cli.max_sessions).unwrap_or(0),
         owner_pod_name: cli.owner_pod_name.clone(),
         owner_pod_uid: cli.owner_pod_uid.clone(),
@@ -189,7 +190,8 @@ mod tests {
         assert_eq!(cfg.health_addr, ":8080");
         assert_eq!(cfg.pod_ready_timeout, Duration::from_secs(180));
         assert_eq!(cfg.build_timeout, Duration::from_secs(1200));
-        assert!(cfg.keepalive_interval.is_zero());
+        assert!(cfg.client_keepalive_interval.is_zero());
+        assert!(cfg.builder_keepalive_interval.is_zero());
         assert_eq!(cfg.max_sessions, 4);
         assert_eq!(cfg.remote_user, "builder");
         assert_eq!(cfg.owner_pod_name, "proxy-0");

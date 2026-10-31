@@ -71,7 +71,8 @@ impl SshProxy {
         builder_host_key: Option<PublicKey>,
     ) -> anyhow::Result<Arc<Self>> {
         let cfg = cfg.with_defaults();
-        let keepalive = (!cfg.keepalive_interval.is_zero()).then_some(cfg.keepalive_interval);
+        let builder_keepalive =
+            (!cfg.builder_keepalive_interval.is_zero()).then_some(cfg.builder_keepalive_interval);
 
         let methods = if client_auth.is_some() {
             MethodSet::from(&[MethodKind::PublicKey][..])
@@ -96,7 +97,7 @@ impl SshProxy {
         };
         let builder_ssh_config = russh::client::Config {
             inactivity_timeout: None,
-            keepalive_interval: keepalive,
+            keepalive_interval: builder_keepalive,
             // The connection is dead if a keepalive goes unanswered for a
             // full interval.
             keepalive_max: 1,
@@ -360,8 +361,8 @@ impl SshProxy {
         let span = error_span!("conn", conn_id = %conn_id, client_addr = %peer);
         async move {
             let _ = tcp.set_nodelay(true);
-            if !self.cfg.keepalive_interval.is_zero()
-                && let Err(err) = set_tcp_keepalive(&tcp, self.cfg.keepalive_interval)
+            if !self.cfg.client_keepalive_interval.is_zero()
+                && let Err(err) = set_tcp_keepalive(&tcp, self.cfg.client_keepalive_interval)
             {
                 debug!(error = %err, "Failed to enable TCP keepalives");
             }

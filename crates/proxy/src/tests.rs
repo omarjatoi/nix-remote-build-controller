@@ -446,7 +446,8 @@ impl Harness {
             remote_port: builder.addr.port(),
             pod_ready_timeout: Duration::from_secs(5),
             poll_interval: Duration::from_millis(10),
-            keepalive_interval: Duration::from_secs(2),
+            client_keepalive_interval: Duration::from_secs(2),
+            builder_keepalive_interval: Duration::from_secs(2),
             client_close_grace: Duration::from_secs(1),
             shutdown_timeout: Duration::from_secs(10),
             build_timeout: Duration::from_secs(90 * 60),
@@ -1064,7 +1065,11 @@ async fn client_leaving_a_stalled_builder_ends_the_session() {
             // A real builder's sshd answers keepalives even when the build
             // hangs; the fake builder cannot, so keepalives would end the
             // session for the wrong reason.
-            c.keepalive_interval = Duration::ZERO;
+            c.builder_keepalive_interval = Duration::ZERO;
+            // Loopback under heavy load sometimes loses the packets that
+            // close the client's connection. As in production, TCP
+            // keepalives then find the client gone.
+            c.client_keepalive_interval = Duration::from_secs(1);
         },
         ..Default::default()
     })
@@ -1162,7 +1167,10 @@ async fn client_public_key_authentication() {
 #[tokio::test]
 async fn slow_login_is_not_interrupted_by_keepalives() {
     let mut h = Harness::new(HarnessOpts {
-        cfg: |c| c.keepalive_interval = Duration::from_millis(200),
+        cfg: |c| {
+            c.client_keepalive_interval = Duration::from_millis(200);
+            c.builder_keepalive_interval = Duration::from_millis(200);
+        },
         ..Default::default()
     })
     .await;
