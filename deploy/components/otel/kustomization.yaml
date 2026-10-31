@@ -9,14 +9,8 @@ resources:
   - otel-collector.yaml
 
 patches:
-  - path: telemetry-env.yaml
-    target:
-      kind: Deployment
-      name: controller
-  - path: telemetry-env.yaml
-    target:
-      kind: Deployment
-      name: proxy
+  - path: controller-telemetry.yaml
+  - path: proxy-telemetry.yaml
   # Environment variables do not reach Nix through sshd, so builder pods are
   # configured in nix.conf.
   - path: builder-otlp.yaml

@@ -1,13 +1,13 @@
-# Applied to both the controller and the proxy.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: not-used
+  name: controller
+  namespace: default
 spec:
   template:
     spec:
       containers:
-        - name: not-used
+        - name: controller
           env:
             - name: POD_NAME
               valueFrom:
