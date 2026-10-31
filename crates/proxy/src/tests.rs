@@ -1066,10 +1066,11 @@ async fn client_leaving_a_stalled_builder_ends_the_session() {
             // hangs; the fake builder cannot, so keepalives would end the
             // session for the wrong reason.
             c.builder_keepalive_interval = Duration::ZERO;
-            // On macOS under heavy load, tokio sometimes misses a socket
-            // event from kqueue, so the proxy may not see the client close
-            // its connection. A TCP keepalive causes a new event and finds
-            // the client gone, as it would in production.
+            // The client closes with unread data, so its kernel resets the
+            // connection instead of closing it. Under heavy parallel load on
+            // macOS that reset sometimes never reaches the proxy, which is
+            // left waiting on an empty socket. As in production, a TCP
+            // keepalive then finds the client gone.
             c.client_keepalive_interval = Duration::from_secs(1);
         },
         ..Default::default()
@@ -1586,12 +1587,12 @@ async fn dial_builder_keeps_to_its_timeout_across_attempts() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let start = Instant::now();
-    // Drops connections for 900ms (a pod still starting), then accepts them
+    // Drops connections for 2.5s (a pod still starting), then accepts them
     // and never answers (a hung sshd).
     tokio::spawn(async move {
         let mut held = Vec::new();
         while let Ok((stream, _)) = listener.accept().await {
-            if start.elapsed() >= Duration::from_millis(900) {
+            if start.elapsed() >= Duration::from_millis(2500) {
                 held.push(stream);
             }
         }
@@ -1600,15 +1601,15 @@ async fn dial_builder_keeps_to_its_timeout_across_attempts() {
     let err = dial_builder(
         addr,
         &auth,
-        Duration::from_secs(1),
+        Duration::from_secs(3),
         &CancellationToken::new(),
     )
     .await
     .err()
     .expect("a hung builder cannot be dialled");
-    // Giving the last attempt a full timeout would take about 1.9s.
+    // Giving the last attempt a full timeout would take about 5.5s.
     assert!(
-        start.elapsed() < Duration::from_millis(1500),
+        start.elapsed() < Duration::from_millis(4500),
         "gave up after {:?}: {err}",
         start.elapsed()
     );
