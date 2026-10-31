@@ -11,6 +11,8 @@ use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields};
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::{EnvFilter, Layer};
 
+use crate::telemetry::TRACE_ONLY_TARGET;
+
 /// Parses a `--log-level` value: `trace`, `debug`, `info`, `warn`, `error` or
 /// `off`.
 pub fn parse_level(level: &str) -> Result<LevelFilter, String> {
@@ -50,10 +52,15 @@ where
 
 /// The filter for logs: see [`stderr_layer`].
 pub(crate) fn filter(level: LevelFilter) -> EnvFilter {
-    match std::env::var("RUST_LOG") {
+    let filter = match std::env::var("RUST_LOG") {
         Ok(spec) if !spec.trim().is_empty() => EnvFilter::new(spec),
         _ => default_filter(level),
-    }
+    };
+    filter.add_directive(
+        format!("{TRACE_ONLY_TARGET}=off")
+            .parse()
+            .expect("valid directive"),
+    )
 }
 
 /// Adds the current trace and span IDs to the JSON objects of another format,
@@ -104,7 +111,7 @@ fn default_filter(level: LevelFilter) -> EnvFilter {
 }
 
 /// The crates of this workspace, as tracing targets.
-const WORKSPACE_CRATES: [&str; 4] = ["api", "common", "controller", "proxy"];
+pub(crate) const WORKSPACE_CRATES: [&str; 4] = ["api", "common", "controller", "proxy"];
 
 #[cfg(test)]
 mod tests {

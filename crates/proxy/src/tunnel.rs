@@ -17,9 +17,9 @@ use tokio::sync::{Notify, mpsc};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{Instrument, Span, debug, info, info_span, warn};
 
-use common::duration;
+use common::{TRACE_ONLY_TARGET, TraceContext, duration};
 
 use crate::SshProxy;
 use crate::config::Config;
@@ -44,6 +44,11 @@ const TASK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(15);
 /// check. The cap keeps a slow-starting pod from being hammered.
 const BUILDER_DIAL_RETRY_INITIAL: Duration = Duration::from_millis(10);
 const BUILDER_DIAL_RETRY_MAX: Duration = Duration::from_millis(50);
+
+/// The environment variable that names the parent span of a process. Nix sets
+/// it for its build hook, so an SSH client with `SendEnv TRACEPARENT` passes it
+/// on, and it reads it again on the builder.
+const TRACEPARENT_ENV: &str = "TRACEPARENT";
 
 /// The client end of a build session.
 pub(crate) struct ClientSide {
@@ -74,29 +79,83 @@ impl ClientSide {
         Arc::clone(&self.writer)
     }
 
+    fn has_room(&self) -> bool {
+        self.pending.len() < PENDING_LIMIT_MESSAGES && self.pending_bytes < PENDING_LIMIT_BYTES
+    }
+
+    fn hold(&mut self, msg: ChannelMsg) {
+        if let ChannelMsg::Data { data } = &msg {
+            self.pending_bytes += data.len();
+        }
+        self.pending.push_back(msg);
+    }
+
+    /// Holds what the client sends until it asks for a command. Returns `false`
+    /// if the client closes the channel (or its connection) first. A client
+    /// that takes longer than `timeout`, or sends too much without asking, is
+    /// no longer waited for.
+    pub(crate) async fn wait_for_command(&mut self, timeout: Duration) -> bool {
+        let wait = async {
+            while self.has_room() {
+                match self.read.wait().await {
+                    None | Some(ChannelMsg::Close) => return false,
+                    Some(msg) => {
+                        let starts_command = starts_command(&msg);
+                        self.hold(msg);
+                        if starts_command {
+                            break;
+                        }
+                    }
+                }
+            }
+            true
+        };
+        tokio::time::timeout(timeout, wait).await.unwrap_or(true)
+    }
+
+    /// The trace the client asked to join, if any, among what it has sent so
+    /// far.
+    pub(crate) fn trace_context(&self) -> Option<TraceContext> {
+        self.pending.iter().find_map(|msg| match msg {
+            ChannelMsg::SetEnv {
+                variable_name,
+                variable_value,
+                ..
+            } if variable_name == TRACEPARENT_ENV => Some(TraceContext {
+                traceparent: variable_value.clone(),
+                tracestate: String::new(),
+            }),
+            _ => None,
+        })
+    }
+
     /// Drives `fut` to completion while buffering what the client sends in
     /// the meantime. Returns `None` if the client closes the channel (or its
     /// connection) first.
     pub(crate) async fn buffer_while<F: Future>(&mut self, fut: F) -> Option<F::Output> {
         tokio::pin!(fut);
         loop {
-            let room = self.pending.len() < PENDING_LIMIT_MESSAGES
-                && self.pending_bytes < PENDING_LIMIT_BYTES;
+            let room = self.has_room();
             tokio::select! {
                 biased;
                 out = &mut fut => return Some(out),
                 msg = self.read.wait(), if room => match msg {
                     None | Some(ChannelMsg::Close) => return None,
-                    Some(msg) => {
-                        if let ChannelMsg::Data { data } = &msg {
-                            self.pending_bytes += data.len();
-                        }
-                        self.pending.push_back(msg);
-                    }
+                    Some(msg) => self.hold(msg),
                 },
             }
         }
     }
+}
+
+/// Whether `msg` asks the server to start something.
+fn starts_command(msg: &ChannelMsg) -> bool {
+    matches!(
+        msg,
+        ChannelMsg::Exec { .. }
+            | ChannelMsg::RequestShell { .. }
+            | ChannelMsg::RequestSubsystem { .. }
+    )
 }
 
 /// The writing end of the client channel, shared by the session and tunnel
@@ -170,15 +229,18 @@ impl SshProxy {
         let _cancel_tunnel = tunnel.clone().drop_guard();
 
         let dial_start = Instant::now();
-        let builder =
-            match dial_builder(addr, &self.builder, self.cfg.builder_dial_timeout, &tunnel).await {
-                Ok(builder) => builder,
-                Err(err) => {
-                    let err = anyhow!("connect to builder pod {addr}: {err}");
-                    writer.fail(&err.to_string()).await;
-                    return SessionResult::failed(err);
-                }
-            };
+        let dial = dial_builder(addr, &self.builder, self.cfg.builder_dial_timeout, &tunnel)
+            .instrument(
+                info_span!(target: TRACE_ONLY_TARGET, "dial_builder", builder_addr = %addr),
+            );
+        let builder = match dial.await {
+            Ok(builder) => builder,
+            Err(err) => {
+                let err = anyhow!("connect to builder pod {addr}: {err}");
+                writer.fail(&err.to_string()).await;
+                return SessionResult::failed(err);
+            }
+        };
         let opened = tokio::time::timeout(
             self.cfg.builder_dial_timeout,
             builder.channel_open_session(),
@@ -195,7 +257,14 @@ impl SshProxy {
 
         self.metrics.builder_dialed(dial_start.elapsed());
         info!(builder_addr = %addr, "Connected to builder pod, tunnelling session");
-        let result = tunnel_session(client, channel, &tunnel, &self.cfg, &self.metrics).await;
+        let result = tunnel_session(client, channel, &tunnel, &self.cfg, &self.metrics)
+            .instrument(info_span!(
+                target: TRACE_ONLY_TARGET,
+                "tunnel",
+                builder_addr = %addr,
+                otel.kind = "client",
+            ))
+            .await;
         // The builder connection lives until the tunnel is done.
         drop(builder);
         result
@@ -370,10 +439,23 @@ async fn tunnel_session(
     let ClientSide {
         read: client_read,
         writer,
-        pending,
+        mut pending,
         ..
     } = client;
     let (builder_read, builder_write) = builder.split();
+    // Nix on the builder continues the proxy's trace. Without one of its own,
+    // the proxy forwards whatever the client sent.
+    if let Some(context) = TraceContext::of(&Span::current()) {
+        pending.retain(|msg| {
+            !matches!(msg, ChannelMsg::SetEnv { variable_name, .. } if variable_name == TRACEPARENT_ENV)
+        });
+        if let Err(err) = builder_write
+            .set_env(false, TRACEPARENT_ENV, context.traceparent)
+            .await
+        {
+            debug!(error = %err, "Failed to send the trace context to the builder");
+        }
+    }
     let shared = Arc::new(Shared::new(
         tunnel.clone(),
         cfg.input_stall_timeout,
@@ -555,12 +637,7 @@ async fn write_builder(
             continue;
         }
 
-        let starts_command = matches!(
-            msg,
-            ChannelMsg::Exec { .. }
-                | ChannelMsg::RequestShell { .. }
-                | ChannelMsg::RequestSubsystem { .. }
-        );
+        let starts_command = starts_command(&msg);
         let mut result = match msg {
             ChannelMsg::Data { data } if started => {
                 let len = data.len();

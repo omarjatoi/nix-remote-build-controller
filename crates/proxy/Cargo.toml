@@ -35,6 +35,7 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+common = { workspace = true, features = ["testing"] }
 api = { workspace = true, features = ["testing"] }
 controller.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

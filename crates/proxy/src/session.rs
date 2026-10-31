@@ -12,7 +12,7 @@ use tracing::{error, info, warn};
 
 use api::kube_error;
 use api::{BuildPhase, NixBuildRequest, NixBuildRequestSpec};
-use common::duration;
+use common::{TraceContext, duration};
 
 use crate::SshProxy;
 use crate::metrics::SessionOutcome;
@@ -41,6 +41,8 @@ pub struct Session {
     pub start: Instant,
     /// True once the `NixBuildRequest` exists and must be cleaned up.
     pub created: bool,
+    /// The session's trace, recorded on the `NixBuildRequest`.
+    pub trace_context: Option<TraceContext>,
 }
 
 impl Session {
@@ -50,6 +52,7 @@ impl Session {
             id: uuid::Uuid::now_v7().to_string(),
             start: Instant::now(),
             created: false,
+            trace_context: None,
         }
     }
 }
@@ -115,11 +118,24 @@ impl SshProxy {
         if seconds > 0 {
             req.spec.timeout_seconds = Some(seconds);
         }
+        let mut annotations = BTreeMap::new();
+        if let Some(context) = &session.trace_context {
+            annotations.insert(
+                api::ANNOTATION_TRACEPARENT.to_string(),
+                context.traceparent.clone(),
+            );
+            if !context.tracestate.is_empty() {
+                annotations.insert(
+                    api::ANNOTATION_TRACESTATE.to_string(),
+                    context.tracestate.clone(),
+                );
+            }
+        }
         if !self.cfg.owner_pod_name.is_empty() && !self.cfg.owner_pod_uid.is_empty() {
-            req.metadata.annotations = Some(BTreeMap::from([(
+            annotations.insert(
                 ANNOTATION_PROXY_POD.to_string(),
                 self.cfg.owner_pod_name.clone(),
-            )]));
+            );
             // If this proxy pod disappears, garbage collection removes its
             // requests and the controller tears down the builder pods.
             req.metadata.owner_references = Some(vec![OwnerReference {
@@ -129,6 +145,9 @@ impl SshProxy {
                 uid: self.cfg.owner_pod_uid.clone(),
                 ..Default::default()
             }]);
+        }
+        if !annotations.is_empty() {
+            req.metadata.annotations = Some(annotations);
         }
 
         self.kube

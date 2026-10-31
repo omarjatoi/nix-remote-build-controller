@@ -14,9 +14,11 @@ use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::logs::SdkLoggerProvider;
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use tracing::level_filters::LevelFilter;
-use tracing::{Span, info, warn};
+use tracing::{Span, Subscriber, info, warn};
 use tracing_subscriber::Layer;
-use tracing_subscriber::layer::SubscriberExt as _;
+use tracing_subscriber::filter::{self, FilterExt as _, Targets};
+use tracing_subscriber::layer::{Context, Filter, SubscriberExt as _};
+use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt as _;
 
 use crate::logging;
@@ -27,16 +29,35 @@ use crate::metrics_provider::MetricsProvider;
 /// a session uses this target to keep the session's fields in those lines.
 pub const TRACE_ONLY_TARGET: &str = "trace_only";
 
+/// Crates that take part in exporting logs. Their own logs must not be
+/// exported, or each export would cause another one.
+const EXPORT_CRATES: [&str; 5] = ["h2", "hyper", "hyper_util", "opentelemetry", "reqwest"];
+
 /// What is sent to the trace exporter: this workspace's spans, and the
 /// Kubernetes API calls made while reconciling. The API calls made outside of
 /// a reconcile (watches, lease renewals, polling) would each be a trace of
 /// their own, or swamp the session they belong to.
-const TRACE_FILTER: &str = "off,api=info,common=info,controller=info,proxy=info,trace_only=info,\
-                            kube_client[reconcile]=debug";
-
-/// Crates that take part in exporting logs. Their own logs must not be
-/// exported, or each export would cause another one.
-const EXPORT_CRATES: [&str; 5] = ["h2", "hyper", "hyper_util", "opentelemetry", "reqwest"];
+pub(crate) fn trace_filter<S>() -> impl Filter<S>
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+{
+    let workspace = Targets::new()
+        .with_targets(
+            logging::WORKSPACE_CRATES
+                .iter()
+                .map(|krate| (*krate, LevelFilter::INFO)),
+        )
+        .with_target(TRACE_ONLY_TARGET, LevelFilter::INFO);
+    workspace.or(filter::dynamic_filter_fn(
+        |metadata, cx: &Context<'_, S>| {
+            metadata.is_span()
+                && metadata.target().starts_with("kube_client")
+                && cx
+                    .lookup_current()
+                    .is_some_and(|span| span.scope().any(|ancestor| ancestor.name() == "reconcile"))
+        },
+    ))
+}
 
 /// The signals that are sent over OTLP.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -133,7 +154,7 @@ impl Telemetry {
         let trace_layer = tracer_provider.as_ref().map(|provider| {
             tracing_opentelemetry::layer()
                 .with_tracer(provider.tracer("nix-remote-build-controller"))
-                .with_filter(tracing_subscriber::EnvFilter::new(TRACE_FILTER))
+                .with_filter(trace_filter())
         });
         let log_layer = logger_provider.as_ref().map(|provider| {
             let filter = EXPORT_CRATES
@@ -217,7 +238,10 @@ fn resource(service: &str, version: &str) -> Resource {
 mod tests {
     use std::collections::HashMap;
 
+    use opentelemetry::trace::Status;
+
     use super::*;
+    use crate::SpanRecorder;
 
     fn signals(vars: &[(&str, &str)]) -> OtlpSignals {
         let vars: HashMap<&str, &str> = vars.iter().copied().collect();
@@ -280,6 +304,41 @@ mod tests {
             ]),
             OtlpSignals::default()
         );
+    }
+
+    #[test]
+    fn only_kubernetes_calls_of_reconciles_are_traced() {
+        let recorder = SpanRecorder::start();
+        tracing::debug_span!(target: "kube_client::client::builder", "lease renewal")
+            .in_scope(|| {});
+        tracing::info_span!(target: "russh::client", "from a dependency").in_scope(|| {});
+        tracing::info_span!(target: TRACE_ONLY_TARGET, "trace only").in_scope(|| {});
+        tracing::error_span!(target: "controller::reconciler", "reconcile").in_scope(|| {
+            tracing::debug_span!(target: "kube_client::client::builder", "pod create")
+                .in_scope(|| {});
+        });
+        let mut names: Vec<String> = recorder
+            .finished_spans()
+            .into_iter()
+            .map(|span| span.name.into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["pod create", "reconcile", "trace only"]);
+    }
+
+    #[test]
+    fn errors_mark_spans_as_failed() {
+        let recorder = SpanRecorder::start();
+        let span = tracing::error_span!(
+            "session",
+            otel.status_code = tracing::field::Empty,
+            otel.status_description = tracing::field::Empty,
+        );
+        span.in_scope(|| {});
+        record_error(&span, "builder went away");
+        drop(span);
+        let spans = recorder.finished_spans();
+        assert_eq!(spans[0].status, Status::error("builder went away"));
     }
 
     #[test]

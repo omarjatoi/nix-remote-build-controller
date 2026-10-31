@@ -19,6 +19,7 @@ use tokio_util::sync::CancellationToken;
 
 use api::fake::FakeKube;
 use api::{BuildPhase, NixBuildRequest, NixBuildRequestStatus};
+use common::SpanRecorder;
 
 use super::*;
 use crate::keys::generate_host_key;
@@ -54,6 +55,8 @@ struct BuilderStats {
     sessions: AtomicI32,
     /// Monotonic count of sessions that reached the wait-for-peers barrier.
     arrived: AtomicI32,
+    /// Environment variables the proxy has sent.
+    env: Mutex<Vec<(String, String)>>,
 }
 
 struct FakeBuilder {
@@ -203,10 +206,16 @@ impl server::Handler for BuilderConn {
     async fn env_request(
         &mut self,
         channel: ChannelId,
-        _name: &str,
-        _value: &str,
+        name: &str,
+        value: &str,
         session: &mut server::Session,
     ) -> Result<(), Self::Error> {
+        self.shared
+            .stats
+            .env
+            .lock()
+            .unwrap()
+            .push((name.to_string(), value.to_string()));
         session.channel_failure(channel)
     }
 }
@@ -733,6 +742,157 @@ async fn build_request_carries_timeout_labels_and_owner_reference() {
         7
     );
 
+    drop(channel);
+    drop(client);
+    h.wait_no_requests().await;
+    h.stop().await.unwrap();
+}
+
+const CLIENT_TRACE: &str = "0af7651916cd43dd8448eb211c80319c";
+const CLIENT_SPAN: &str = "b7ad6b7169203331";
+
+async fn run_with_trace(h: &Harness) -> Output {
+    let client = h.dial().await;
+    let channel = client.channel_open_session().await.unwrap();
+    channel
+        .set_env(
+            false,
+            "TRACEPARENT",
+            format!("00-{CLIENT_TRACE}-{CLIENT_SPAN}-01"),
+        )
+        .await
+        .unwrap();
+    channel.set_env(false, "OTHER", "kept").await.unwrap();
+    channel.exec(true, "echo-upper").await.unwrap();
+    channel.data(&b"hi\n"[..]).await.unwrap();
+    channel.eof().await.unwrap();
+    collect(channel).await
+}
+
+#[tokio::test]
+async fn sessions_continue_the_trace_of_the_client() {
+    let recorder = SpanRecorder::start();
+    let mut h = Harness::new(HarnessOpts::default()).await;
+    let annotation = Arc::new(Mutex::new(None));
+    let watcher = {
+        let fake = h.fake.clone();
+        let annotation = Arc::clone(&annotation);
+        tokio::spawn(async move {
+            loop {
+                for req in fake.requests(NS) {
+                    if let Some(annotations) = req.metadata.annotations {
+                        *annotation.lock().unwrap() =
+                            annotations.get(api::ANNOTATION_TRACEPARENT).cloned();
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+    };
+    let out = run_with_trace(&h).await;
+    assert_eq!(out.exit_status, Some(0));
+    assert_eq!(out.stdout, "HI\n");
+    watcher.abort();
+    h.stop().await.unwrap();
+
+    let spans = recorder.finished_spans();
+    let span = |name: &str| {
+        spans
+            .iter()
+            .find(|span| span.name == name)
+            .unwrap_or_else(|| panic!("no {name} span"))
+    };
+    let session = span("session");
+    assert_eq!(session.span_context.trace_id().to_string(), CLIENT_TRACE);
+    assert_eq!(session.parent_span_id.to_string(), CLIENT_SPAN);
+    for name in [
+        "create_build_request",
+        "wait_for_builder_pod",
+        "dial_builder",
+        "tunnel",
+        "finalize_build_request",
+    ] {
+        assert_eq!(
+            span(name).parent_span_id,
+            session.span_context.span_id(),
+            "{name} is a child of the session"
+        );
+    }
+
+    // The controller continues from the session.
+    let annotation = annotation.lock().unwrap().clone().expect("annotation");
+    assert_eq!(
+        annotation,
+        format!("00-{CLIENT_TRACE}-{}-01", session.span_context.span_id())
+    );
+
+    // Nix on the builder continues from the tunnel, and sees nothing else of
+    // the client's trace context.
+    let env = h.builder.stats.env.lock().unwrap().clone();
+    let traceparent = format!(
+        "00-{CLIENT_TRACE}-{}-01",
+        span("tunnel").span_context.span_id()
+    );
+    assert_eq!(
+        env,
+        [
+            ("TRACEPARENT".to_string(), traceparent),
+            ("OTHER".to_string(), "kept".to_string()),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn trace_context_passes_through_when_the_proxy_is_not_tracing() {
+    let mut h = Harness::new(HarnessOpts::default()).await;
+    let out = run_with_trace(&h).await;
+    assert_eq!(out.exit_status, Some(0));
+    h.stop().await.unwrap();
+    let env = h.builder.stats.env.lock().unwrap().clone();
+    assert_eq!(
+        env[0],
+        (
+            "TRACEPARENT".to_string(),
+            format!("00-{CLIENT_TRACE}-{CLIENT_SPAN}-01")
+        )
+    );
+}
+
+#[tokio::test]
+async fn sessions_without_a_command_create_nothing() {
+    let mut h = Harness::new(HarnessOpts {
+        mode: ControllerMode::Never,
+        ..Default::default()
+    })
+    .await;
+    let client = h.dial().await;
+    let channel = client.channel_open_session().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(h.requests().is_empty(), "no pod before a command");
+    assert_eq!(h.proxy.session_count(), 1);
+    channel.close().await.unwrap();
+    wait_until("the session to end", Duration::from_secs(5), || {
+        h.proxy.session_count() == 0
+    })
+    .await;
+    assert!(h.requests().is_empty());
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn sessions_start_once_the_client_has_had_its_time() {
+    let mut h = Harness::new(HarnessOpts {
+        mode: ControllerMode::Never,
+        cfg: |c| c.handshake_timeout = Duration::from_millis(50),
+        ..Default::default()
+    })
+    .await;
+    let client = h.dial().await;
+    let channel = client.channel_open_session().await.unwrap();
+    wait_until("a NixBuildRequest", Duration::from_secs(5), || {
+        !h.requests().is_empty()
+    })
+    .await;
     drop(channel);
     drop(client);
     h.wait_no_requests().await;

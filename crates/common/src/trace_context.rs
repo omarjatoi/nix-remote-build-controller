@@ -52,69 +52,51 @@ impl TraceContext {
 
 #[cfg(test)]
 mod tests {
-    use opentelemetry::trace::TracerProvider as _;
-    use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
-    use tracing_subscriber::layer::SubscriberExt as _;
+    use opentelemetry::trace::SpanId;
 
     use super::*;
+    use crate::SpanRecorder;
 
-    const PARENT: &str = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
-
-    fn traced(run: impl FnOnce()) -> Vec<opentelemetry_sdk::trace::SpanData> {
-        let exporter = InMemorySpanExporter::default();
-        let provider = SdkTracerProvider::builder()
-            .with_simple_exporter(exporter.clone())
-            .build();
-        let subscriber = tracing_subscriber::registry()
-            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")));
-        tracing::subscriber::with_default(subscriber, run);
-        provider.force_flush().unwrap();
-        exporter.get_finished_spans().unwrap()
-    }
+    const TRACE: &str = "0af7651916cd43dd8448eb211c80319c";
+    const PARENT_SPAN: &str = "b7ad6b7169203331";
 
     #[test]
     fn spans_join_the_trace_of_their_parent_context() {
-        let spans = traced(|| {
-            let span = tracing::error_span!("session");
-            TraceContext {
-                traceparent: PARENT.to_string(),
-                tracestate: "vendor=1".to_string(),
-            }
-            .set_parent_of(&span);
-            let context = TraceContext::of(&span).expect("span is traced");
-            assert!(
-                context
-                    .traceparent
-                    .contains("0af7651916cd43dd8448eb211c80319c")
-            );
-            assert!(!context.traceparent.contains("b7ad6b7169203331"));
-            assert_eq!(context.tracestate, "vendor=1");
-        });
+        let recorder = SpanRecorder::start();
+        let span = tracing::error_span!("session");
+        TraceContext {
+            traceparent: format!("00-{TRACE}-{PARENT_SPAN}-01"),
+            tracestate: "vendor=1".to_string(),
+        }
+        .set_parent_of(&span);
+        let context = TraceContext::of(&span).expect("span is traced");
+        assert!(context.traceparent.contains(TRACE));
+        assert!(!context.traceparent.contains(PARENT_SPAN));
+        assert_eq!(context.tracestate, "vendor=1");
+        drop(span);
+
+        let spans = recorder.finished_spans();
         assert_eq!(spans.len(), 1);
-        assert_eq!(
-            spans[0].span_context.trace_id().to_string(),
-            "0af7651916cd43dd8448eb211c80319c"
-        );
-        assert_eq!(spans[0].parent_span_id.to_string(), "b7ad6b7169203331");
+        assert_eq!(spans[0].span_context.trace_id().to_string(), TRACE);
+        assert_eq!(spans[0].parent_span_id.to_string(), PARENT_SPAN);
     }
 
     #[test]
     fn malformed_contexts_start_a_new_trace() {
-        let spans = traced(|| {
-            let span = tracing::error_span!("session");
-            TraceContext {
-                traceparent: "not a traceparent".to_string(),
-                tracestate: String::new(),
-            }
-            .set_parent_of(&span);
-            assert!(TraceContext::of(&span).is_some());
-        });
+        let recorder = SpanRecorder::start();
+        let span = tracing::error_span!("session");
+        TraceContext {
+            traceparent: "not a traceparent".to_string(),
+            tracestate: String::new(),
+        }
+        .set_parent_of(&span);
+        assert!(TraceContext::of(&span).is_some());
+        drop(span);
+
+        let spans = recorder.finished_spans();
         assert_eq!(spans.len(), 1);
         assert!(spans[0].span_context.is_valid());
-        assert_eq!(
-            spans[0].parent_span_id,
-            opentelemetry::trace::SpanId::INVALID
-        );
+        assert_eq!(spans[0].parent_span_id, SpanId::INVALID);
     }
 
     #[test]

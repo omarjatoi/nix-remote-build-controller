@@ -16,6 +16,7 @@ use api::fake::FakeKube;
 use api::{
     BuildPhase, ControllerClient, NixBuildRequest, NixBuildRequestSpec, NixBuildRequestStatus,
 };
+use common::SpanRecorder;
 
 use super::*;
 use crate::reconciler::{REQUEUE_CONFLICT, REQUEUE_CREATING, REQUEUE_RUNNING, pod_failure_reason};
@@ -222,6 +223,28 @@ async fn pod_spec_honours_request_overrides() {
             "timeout {timeout}"
         );
     }
+}
+
+#[tokio::test]
+async fn reconciles_join_the_trace_of_their_session() {
+    const TRACE: &str = "0af7651916cd43dd8448eb211c80319c";
+    const SESSION_SPAN: &str = "b7ad6b7169203331";
+    let recorder = SpanRecorder::start();
+    let fake = FakeKube::new();
+    let r = reconciler(&fake);
+    let mut req = new_request("traced");
+    req.metadata.annotations = Some(BTreeMap::from([(
+        api::ANNOTATION_TRACEPARENT.to_string(),
+        format!("00-{TRACE}-{SESSION_SPAN}-01"),
+    )]));
+    fake.insert_request(req);
+    reconcile(&r, &fake, "build-traced").await;
+
+    let spans = recorder.finished_spans();
+    assert_eq!(spans.len(), 1);
+    assert_eq!(spans[0].name, "reconcile");
+    assert_eq!(spans[0].span_context.trace_id().to_string(), TRACE);
+    assert_eq!(spans[0].parent_span_id.to_string(), SESSION_SPAN);
 }
 
 #[tokio::test]

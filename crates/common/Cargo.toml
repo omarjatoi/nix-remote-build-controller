@@ -8,6 +8,10 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+# Records spans in memory (`common::SpanRecorder`).
+testing = ["opentelemetry_sdk/testing"]
+
 [dependencies]
 anyhow.workspace = true
 axum.workspace = true

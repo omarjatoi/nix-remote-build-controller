@@ -21,6 +21,13 @@ pub const KIND: &str = "NixBuildRequest";
 /// Label carrying the session ID, set on `NixBuildRequest`s and builder pods.
 pub const LABEL_SESSION_ID: &str = "nix.io/session-id";
 
+/// Annotation with the W3C `traceparent` of the session behind a request, so
+/// that the work done for it joins the session's trace.
+pub const ANNOTATION_TRACEPARENT: &str = "nix.io/traceparent";
+/// Annotation with the W3C `tracestate` that goes with
+/// [`ANNOTATION_TRACEPARENT`].
+pub const ANNOTATION_TRACESTATE: &str = "nix.io/tracestate";
+
 /// A request for a Nix build that needs a dedicated builder pod.
 #[derive(CustomResource, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[kube(

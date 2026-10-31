@@ -19,11 +19,12 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
-use tracing::{Instrument, debug, error, error_span, info, warn};
+use tracing::field::Empty;
+use tracing::{Instrument, Span, debug, error, error_span, info, info_span, warn};
 
 use api::{BuildRequestClient, KubeBuildRequestClient, secret};
-use common::duration;
 use common::http::HttpServer;
+use common::{TRACE_ONLY_TARGET, TraceContext, duration};
 
 use crate::auth::{ClientAuthorizer, fingerprint};
 use crate::config::Config;
@@ -504,22 +505,30 @@ impl SshProxy {
         self: Arc<Self>,
         mut session: Session,
         guard: SessionGuard,
-        channel: Channel<Msg>,
-        handle: server::Handle,
+        client: ClientSide,
         conn_token: CancellationToken,
     ) {
         info!(
             active_sessions = self.session_count(),
             "Build session opened"
         );
-        let client = ClientSide::new(channel, handle);
+        let span = Span::current();
+        session.trace_context = TraceContext::of(&span);
         let writer = client.writer();
 
         let result = self.run_session(&mut session, client, &conn_token).await;
         writer.close().await;
-        self.finalize_build_request(&session, &result).await;
+        self.finalize_build_request(&session, &result)
+            .instrument(info_span!(target: TRACE_ONLY_TARGET, "finalize_build_request"))
+            .await;
         drop(guard);
 
+        if let Some(status) = result.exit_status {
+            span.record("exit_status", status);
+        }
+        if let Some(err) = &result.err {
+            common::record_error(&span, &format!("{err:#}"));
+        }
         let elapsed = session.start.elapsed();
         self.metrics.session_ended(result.outcome(), elapsed);
         info!(
@@ -535,7 +544,11 @@ impl SshProxy {
         mut client: ClientSide,
         conn_token: &CancellationToken,
     ) -> SessionResult {
-        if let Err(err) = self.create_build_request(session).await {
+        let created = self
+            .create_build_request(session)
+            .instrument(info_span!(target: TRACE_ONLY_TARGET, "create_build_request"))
+            .await;
+        if let Err(err) = created {
             error!(error = %format!("{err:#}"), "Failed to create NixBuildRequest");
             client
                 .writer()
@@ -548,10 +561,10 @@ impl SshProxy {
         // The client starts talking (exec, then the nix-store handshake) right
         // away; hold that input until the builder is reachable, and notice if
         // the client gives up in the meantime.
-        let pod_ip = match client
-            .buffer_while(self.wait_for_builder_pod(session, conn_token))
-            .await
-        {
+        let wait = self
+            .wait_for_builder_pod(session, conn_token)
+            .instrument(info_span!(target: TRACE_ONLY_TARGET, "wait_for_builder_pod"));
+        let pod_ip = match client.buffer_while(wait).await {
             Some(Ok(ip)) => {
                 self.metrics.builder_ready(session.start.elapsed());
                 ip
@@ -702,21 +715,39 @@ impl server::Handler for ConnHandler {
         };
         reply.accept().await;
 
-        let span = error_span!(
-            "session",
-            conn_id = %self.conn_id,
-            client_addr = %self.peer,
-            session_id = %build.id,
-        );
+        let mut client = ClientSide::new(channel, session.handle());
         let proxy = Arc::clone(&self.proxy);
-        let fut = proxy.handle_channel(
-            build,
-            guard,
-            channel,
-            session.handle(),
-            self.conn_token.clone(),
-        );
-        self.channels.spawn(fut.instrument(span));
+        let conn_id = self.conn_id.clone();
+        let peer = self.peer;
+        let conn_token = self.conn_token.clone();
+        self.channels.spawn(async move {
+            // Clients name their trace in the environment, which is complete
+            // once they ask for a command. A span's parent cannot change once
+            // the span has started, so the session starts here.
+            let timeout = proxy.cfg.handshake_timeout;
+            if !client.wait_for_command(timeout).await {
+                debug!(conn_id = %conn_id, "Client closed a session without running anything");
+                client.writer().close().await;
+                return;
+            }
+            let span = error_span!(
+                "session",
+                conn_id = %conn_id,
+                client_addr = %peer,
+                session_id = %build.id,
+                exit_status = Empty,
+                otel.kind = "server",
+                otel.status_code = Empty,
+                otel.status_description = Empty,
+            );
+            if let Some(parent) = client.trace_context() {
+                parent.set_parent_of(&span);
+            }
+            proxy
+                .handle_channel(build, guard, client, conn_token)
+                .instrument(span)
+                .await;
+        });
         Ok(())
     }
 

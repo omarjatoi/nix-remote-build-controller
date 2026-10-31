@@ -12,11 +12,12 @@ use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::runtime::events::EventType;
 use kube::{Resource, ResourceExt};
 use opentelemetry::KeyValue;
+use tracing::field::Empty;
 use tracing::{Instrument, debug, error_span, info, warn};
 
 use api::{BuildEvent, BuildPhase, ControllerClient, NixBuildRequest, NixBuildRequestStatus};
 use api::{kube_error, secret};
-use common::duration;
+use common::{TraceContext, duration};
 
 use crate::Metrics;
 
@@ -138,8 +139,21 @@ impl<C: ControllerClient> Reconciler<C> {
             namespace = %namespace(req),
             session_id = %req.spec.session_id,
             phase = api::phase_str(phase),
+            otel.kind = "consumer",
+            otel.status_code = Empty,
+            otel.status_description = Empty,
         );
-        self.reconcile_inner(req, phase).instrument(span).await
+        if let Some(parent) = trace_parent(req) {
+            parent.set_parent_of(&span);
+        }
+        let result = self
+            .reconcile_inner(req, phase)
+            .instrument(span.clone())
+            .await;
+        if let Err(err) = &result {
+            common::record_error(&span, &err.to_string());
+        }
+        result
     }
 
     async fn reconcile_inner(
@@ -620,6 +634,18 @@ pub fn builder_pod_name(req: &NixBuildRequest) -> String {
 
 fn namespace(req: &NixBuildRequest) -> String {
     req.namespace().unwrap_or_default()
+}
+
+/// The context of the session that created `req`, if it was traced.
+pub(crate) fn trace_parent(req: &NixBuildRequest) -> Option<TraceContext> {
+    let annotations = req.metadata.annotations.as_ref()?;
+    Some(TraceContext {
+        traceparent: annotations.get(api::ANNOTATION_TRACEPARENT)?.clone(),
+        tracestate: annotations
+            .get(api::ANNOTATION_TRACESTATE)
+            .cloned()
+            .unwrap_or_default(),
+    })
 }
 
 fn has_finalizer(req: &NixBuildRequest) -> bool {
