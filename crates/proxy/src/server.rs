@@ -724,10 +724,28 @@ impl server::Handler for ConnHandler {
             // Clients name their trace in the environment, which is complete
             // once they ask for a command. A span's parent cannot change once
             // the span has started, so the session starts here.
-            if !client.wait_for_command(proxy.cfg.command_timeout).await {
-                debug!(conn_id = %conn_id, "Client closed a session without running anything");
-                client.writer().close().await;
-                return;
+            let waited = tokio::select! {
+                biased;
+                requested = client.wait_for_command(proxy.cfg.command_timeout) => Some(requested),
+                () = proxy.draining.cancelled() => None,
+            };
+            match waited {
+                Some(true) => {}
+                Some(false) => {
+                    debug!(conn_id = %conn_id, "Client closed a session without running anything");
+                    client.writer().close().await;
+                    return;
+                }
+                // Nothing has started yet, so this is a new session, and those
+                // are refused during shutdown.
+                None => {
+                    warn!(conn_id = %conn_id, "Rejecting session: proxy is shutting down");
+                    proxy.metrics.session_rejected(RejectReason::ShuttingDown);
+                    let writer = client.writer();
+                    writer.fail("the proxy is shutting down").await;
+                    writer.close().await;
+                    return;
+                }
             }
             let span = error_span!(
                 "session",

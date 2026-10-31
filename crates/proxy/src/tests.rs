@@ -883,6 +883,59 @@ async fn sessions_without_a_command_create_nothing() {
 }
 
 #[tokio::test]
+async fn shutdown_rejects_sessions_still_waiting_for_a_command() {
+    let mut h = Harness::new(HarnessOpts {
+        mode: ControllerMode::Never,
+        cfg: |c| c.command_timeout = Duration::from_millis(200),
+        ..Default::default()
+    })
+    .await;
+    let client = h.dial().await;
+    let channel = client.channel_open_session().await.unwrap();
+    wait_until("the session to open", Duration::from_secs(5), || {
+        h.proxy.session_count() == 1
+    })
+    .await;
+
+    h.shutdown.cancel();
+    let out = collect(channel).await;
+    assert_eq!(out.exit_status, Some(255), "stderr: {}", out.stderr);
+    assert!(
+        out.stderr.contains("shutting down"),
+        "the client is told why: {}",
+        out.stderr
+    );
+    // Well past `command_timeout`, which must no longer start the session.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(
+        h.requests().is_empty(),
+        "a proxy that is shutting down must not start a builder pod"
+    );
+    assert_eq!(h.proxy.session_count(), 0, "the session ended");
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn shutdown_does_not_stop_a_session_whose_command_has_arrived() {
+    let mut h = Harness::new(HarnessOpts::default()).await;
+    let client = h.dial().await;
+    let channel = client.channel_open_session().await.unwrap();
+    channel.exec(true, "echo-upper").await.unwrap();
+    wait_until("a NixBuildRequest", Duration::from_secs(5), || {
+        !h.requests().is_empty()
+    })
+    .await;
+
+    h.shutdown.cancel();
+    channel.data(&b"still here\n"[..]).await.unwrap();
+    channel.eof().await.unwrap();
+    let out = collect(channel).await;
+    assert_eq!(out.exit_status, Some(0), "stderr: {}", out.stderr);
+    assert_eq!(out.stdout, "STILL HERE\n");
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn sessions_start_once_the_client_has_had_its_time() {
     let mut h = Harness::new(HarnessOpts {
         mode: ControllerMode::Never,
