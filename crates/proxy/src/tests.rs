@@ -1066,9 +1066,10 @@ async fn client_leaving_a_stalled_builder_ends_the_session() {
             // hangs; the fake builder cannot, so keepalives would end the
             // session for the wrong reason.
             c.builder_keepalive_interval = Duration::ZERO;
-            // Loopback under heavy load sometimes loses the packets that
-            // close the client's connection. As in production, TCP
-            // keepalives then find the client gone.
+            // On macOS under heavy load, tokio sometimes misses a socket
+            // event from kqueue, so the proxy may not see the client close
+            // its connection. A TCP keepalive causes a new event and finds
+            // the client gone, as it would in production.
             c.client_keepalive_interval = Duration::from_secs(1);
         },
         ..Default::default()
@@ -1427,11 +1428,23 @@ fn builder_auth(client_key: &PrivateKey, host_key: Option<PublicKey>) -> Builder
     }
 }
 
-/// An address on loopback with nothing listening on it, so a dial is refused
-/// the way it is against a builder pod whose sshd has not bound yet.
-async fn reserve_addr() -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    listener.local_addr().unwrap()
+/// An address on loopback that refuses connections at once, the way a builder
+/// pod does before its sshd has bound. The port is outside the range the
+/// system hands out, so no test is given it and a dial cannot connect to
+/// itself.
+fn refusing_addr() -> SocketAddr {
+    SocketAddr::from(([127, 0, 0, 1], 1))
+}
+
+/// A bound socket that is not listening yet, for a builder that starts late.
+/// Holding the port keeps other tests from taking it.
+fn unstarted_listener() -> (socket2::Socket, SocketAddr) {
+    let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
+    socket
+        .bind(&SocketAddr::from(([127, 0, 0, 1], 0)).into())
+        .unwrap();
+    let addr = socket.local_addr().unwrap().as_socket().unwrap();
+    (socket, addr)
 }
 
 // The controller hands the proxy a pod IP as soon as the pod has one, which is
@@ -1439,7 +1452,7 @@ async fn reserve_addr() -> SocketAddr {
 #[tokio::test]
 async fn dial_builder_retries_while_builder_is_still_starting() {
     let client_key = key();
-    let addr = reserve_addr().await;
+    let (socket, addr) = unstarted_listener();
     let host_key = Arc::new(Mutex::new(None::<PublicKey>));
     let started = Arc::new(AtomicBool::new(false));
 
@@ -1448,9 +1461,11 @@ async fn dial_builder_retries_while_builder_is_still_starting() {
         let host_key = Arc::clone(&host_key);
         let started = Arc::clone(&started);
         tokio::spawn(async move {
-            // Long enough that the first several dials are refused.
+            // Long enough that the first dials fail.
             tokio::time::sleep(Duration::from_millis(300)).await;
-            let listener = TcpListener::bind(addr).await.unwrap();
+            socket.listen(128).unwrap();
+            socket.set_nonblocking(true).unwrap();
+            let listener = TcpListener::from_std(socket.into()).unwrap();
             let builder = FakeBuilder::serve(listener, proxy_key);
             *host_key.lock().unwrap() = Some(builder.host_key.clone());
             started.store(true, Ordering::SeqCst);
@@ -1483,7 +1498,7 @@ async fn dial_builder_retries_while_builder_is_still_starting() {
 // rather than hanging for the whole session.
 #[tokio::test]
 async fn dial_builder_gives_up_after_timeout() {
-    let addr = reserve_addr().await;
+    let addr = refusing_addr();
     let auth = builder_auth(&key(), Some(key().public_key().clone()));
     let start = Instant::now();
     let err = dial_builder(
@@ -1601,7 +1616,7 @@ async fn dial_builder_keeps_to_its_timeout_across_attempts() {
 
 #[tokio::test]
 async fn dial_builder_stops_when_cancelled() {
-    let addr = reserve_addr().await;
+    let addr = refusing_addr();
     let auth = builder_auth(&key(), None);
     let cancel = CancellationToken::new();
     let cancel_soon = cancel.clone();
@@ -1621,7 +1636,7 @@ async fn dial_builder_stops_when_cancelled() {
 #[tokio::test]
 async fn builder_not_up_yet_classification() {
     // A refused connection is the normal state while a pod is starting.
-    let addr = reserve_addr().await;
+    let addr = refusing_addr();
     let refused = tokio::net::TcpStream::connect(addr)
         .await
         .expect_err("port should refuse");
