@@ -37,6 +37,7 @@ manifests: ## Render the base manifests with kustomize
 validate: ## Validate rendered manifests against the Kubernetes schema
 	kustomize build deploy | kubeconform -strict -ignore-missing-schemas -summary
 	kustomize build test/e2e/manifests | kubeconform -strict -ignore-missing-schemas -summary
+	kustomize build test/e2e/manifests-otel | kubeconform -strict -ignore-missing-schemas -summary
 
 e2e: ## Run the full Kind-based end-to-end test
 	bash test/e2e/run.sh

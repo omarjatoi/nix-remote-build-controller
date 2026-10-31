@@ -19,15 +19,17 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
-use tracing::{Instrument, debug, error, error_span, info, warn};
+use tracing::field::Empty;
+use tracing::{Instrument, Span, debug, error, error_span, info, info_span, warn};
 
 use api::{BuildRequestClient, KubeBuildRequestClient, secret};
-use common::duration;
 use common::http::HttpServer;
+use common::{TRACE_ONLY_TARGET, TraceContext, duration};
 
 use crate::auth::{ClientAuthorizer, fingerprint};
 use crate::config::Config;
 use crate::keys::{generate_host_key, load_private_key, private_key_from_secret};
+use crate::metrics::{Metrics, RejectReason};
 use crate::session::{Session, SessionResult};
 use crate::stream::CancellableStream;
 use crate::tunnel::{BuilderAuth, ClientSide};
@@ -44,6 +46,7 @@ pub struct SshProxy {
     pub(crate) cfg: Config,
     pub(crate) kube: Arc<dyn BuildRequestClient>,
     pub(crate) builder: BuilderAuth,
+    pub(crate) metrics: Metrics,
     listener: Mutex<Option<TcpListener>>,
     local_addr: SocketAddr,
     ssh_config: Arc<server::Config>,
@@ -62,13 +65,14 @@ impl SshProxy {
     /// client may connect, which is only acceptable when network policy
     /// restricts who can reach the proxy. Without `builder_host_key` any
     /// builder host key is accepted.
-    pub async fn new(
+    pub async fn try_new(
         cfg: Config,
         kube: Arc<dyn BuildRequestClient>,
         host_key: PrivateKey,
         builder_client_key: PrivateKey,
         client_auth: Option<ClientAuthorizer>,
         builder_host_key: Option<PublicKey>,
+        metrics: Metrics,
     ) -> anyhow::Result<Arc<Self>> {
         let cfg = cfg.with_defaults();
         let builder_keepalive =
@@ -133,6 +137,7 @@ impl SshProxy {
             },
             cfg,
             kube,
+            metrics,
             listener: Mutex::new(Some(listener)),
             local_addr,
             ssh_config: Arc::new(ssh_config),
@@ -145,11 +150,12 @@ impl SshProxy {
 
     /// Creates a proxy using in-cluster (or kubeconfig) credentials, loading
     /// all key material from the SSH key secret unless overridden by files.
-    pub async fn from_cluster(
+    pub async fn try_new_from_cluster(
         cfg: Config,
         host_key_path: Option<&Path>,
         ssh_key_secret: &str,
         client_authorized_keys_path: Option<&Path>,
+        metrics: Metrics,
     ) -> anyhow::Result<Arc<Self>> {
         let cfg = cfg.with_defaults();
         let client = Client::try_default()
@@ -238,13 +244,14 @@ impl SshProxy {
             None
         };
 
-        Self::new(
+        Self::try_new(
             cfg,
             Arc::new(KubeBuildRequestClient::new(client)),
             host_key,
             builder_client_key,
             client_auth,
             builder_host_key,
+            metrics,
         )
         .await
     }
@@ -292,6 +299,7 @@ impl SshProxy {
                 () = shutdown.cancelled() => break,
                 accepted = listener.accept() => match accepted {
                     Ok((stream, peer)) => {
+                        self.metrics.connection_accepted();
                         let proxy = Arc::clone(self);
                         let force = force.clone();
                         connections.spawn(async move { proxy.handle_connection(stream, peer, force).await });
@@ -484,8 +492,10 @@ impl SshProxy {
             return None;
         }
         sessions.insert(id.to_string());
+        self.metrics.add_active_sessions(1);
         Some(SessionGuard {
             sessions: Arc::clone(&self.sessions),
+            metrics: self.metrics.clone(),
             id: id.to_string(),
         })
     }
@@ -495,25 +505,35 @@ impl SshProxy {
         self: Arc<Self>,
         mut session: Session,
         guard: SessionGuard,
-        channel: Channel<Msg>,
-        handle: server::Handle,
+        client: ClientSide,
         conn_token: CancellationToken,
     ) {
         info!(
             active_sessions = self.session_count(),
             "Build session opened"
         );
-        let client = ClientSide::new(channel, handle);
+        let span = Span::current();
+        session.trace_context = TraceContext::of(&span);
         let writer = client.writer();
 
         let result = self.run_session(&mut session, client, &conn_token).await;
         writer.close().await;
-        self.finalize_build_request(&session, &result).await;
+        self.finalize_build_request(&session, &result)
+            .instrument(info_span!(target: TRACE_ONLY_TARGET, "finalize_build_request"))
+            .await;
         drop(guard);
 
+        if let Some(status) = result.exit_status {
+            span.record("exit_status", status);
+        }
+        if let Some(err) = &result.err {
+            common::record_error(&span, &format!("{err:#}"));
+        }
+        let elapsed = session.start.elapsed();
+        self.metrics.session_ended(result.outcome(), elapsed);
         info!(
             succeeded = result.err.is_none(),
-            duration = %duration::format(session.start.elapsed()),
+            duration = %duration::format(elapsed),
             "Build session closed"
         );
     }
@@ -524,7 +544,11 @@ impl SshProxy {
         mut client: ClientSide,
         conn_token: &CancellationToken,
     ) -> SessionResult {
-        if let Err(err) = self.create_build_request(session).await {
+        let created = self
+            .create_build_request(session)
+            .instrument(info_span!(target: TRACE_ONLY_TARGET, "create_build_request"))
+            .await;
+        if let Err(err) = created {
             error!(error = %format!("{err:#}"), "Failed to create NixBuildRequest");
             client
                 .writer()
@@ -537,11 +561,14 @@ impl SshProxy {
         // The client starts talking (exec, then the nix-store handshake) right
         // away; hold that input until the builder is reachable, and notice if
         // the client gives up in the meantime.
-        let pod_ip = match client
-            .buffer_while(self.wait_for_builder_pod(session, conn_token))
-            .await
-        {
-            Some(Ok(ip)) => ip,
+        let wait = self
+            .wait_for_builder_pod(session, conn_token)
+            .instrument(info_span!(target: TRACE_ONLY_TARGET, "wait_for_builder_pod"));
+        let pod_ip = match client.buffer_while(wait).await {
+            Some(Ok(ip)) => {
+                self.metrics.builder_ready(session.start.elapsed());
+                ip
+            }
             Some(Err(err)) => {
                 error!(error = %format!("{err:#}"), "Builder pod did not become ready");
                 client
@@ -565,6 +592,7 @@ impl SshProxy {
 /// Removes a session from the active set when dropped.
 struct SessionGuard {
     sessions: Arc<Mutex<HashSet<String>>>,
+    metrics: Metrics,
     id: String,
 }
 
@@ -574,6 +602,7 @@ impl Drop for SessionGuard {
             .lock()
             .expect("mutex poisoned")
             .remove(&self.id);
+        self.metrics.add_active_sessions(-1);
     }
 }
 
@@ -638,6 +667,7 @@ impl server::Handler for ConnHandler {
         if auth == Auth::Accept {
             self.client_key = Some(fp);
         } else {
+            self.proxy.metrics.auth_rejected();
             debug!(user, key = %fp, "Public key is not authorized");
         }
         Ok(auth)
@@ -662,6 +692,9 @@ impl server::Handler for ConnHandler {
     ) -> Result<(), Self::Error> {
         if self.proxy.draining.is_cancelled() {
             warn!(conn_id = %self.conn_id, "Rejecting session: proxy is shutting down");
+            self.proxy
+                .metrics
+                .session_rejected(RejectReason::ShuttingDown);
             reply
                 .reject(ChannelOpenFailure::AdministrativelyProhibited)
                 .await;
@@ -674,26 +707,64 @@ impl server::Handler for ConnHandler {
                 max_sessions = self.proxy.cfg.max_sessions,
                 "Rejecting session: concurrent session limit reached"
             );
+            self.proxy
+                .metrics
+                .session_rejected(RejectReason::SessionLimit);
             reply.reject(ChannelOpenFailure::ResourceShortage).await;
             return Ok(());
         };
         reply.accept().await;
 
-        let span = error_span!(
-            "session",
-            conn_id = %self.conn_id,
-            client_addr = %self.peer,
-            session_id = %build.id,
-        );
+        let mut client = ClientSide::new(channel, session.handle());
         let proxy = Arc::clone(&self.proxy);
-        let fut = proxy.handle_channel(
-            build,
-            guard,
-            channel,
-            session.handle(),
-            self.conn_token.clone(),
-        );
-        self.channels.spawn(fut.instrument(span));
+        let conn_id = self.conn_id.clone();
+        let peer = self.peer;
+        let conn_token = self.conn_token.clone();
+        self.channels.spawn(async move {
+            // Clients name their trace in the environment, which is complete
+            // once they ask for a command. A span's parent cannot change once
+            // the span has started, so the session starts here.
+            let waited = tokio::select! {
+                biased;
+                requested = client.wait_for_command(proxy.cfg.command_timeout) => Some(requested),
+                () = proxy.draining.cancelled() => None,
+            };
+            match waited {
+                Some(true) => {}
+                Some(false) => {
+                    debug!(conn_id = %conn_id, "Client closed a session without running anything");
+                    client.writer().close().await;
+                    return;
+                }
+                // Nothing has started yet, so this is a new session, and those
+                // are refused during shutdown.
+                None => {
+                    warn!(conn_id = %conn_id, "Rejecting session: proxy is shutting down");
+                    proxy.metrics.session_rejected(RejectReason::ShuttingDown);
+                    let writer = client.writer();
+                    writer.fail("the proxy is shutting down").await;
+                    writer.close().await;
+                    return;
+                }
+            }
+            let span = error_span!(
+                "session",
+                conn_id = %conn_id,
+                client_addr = %peer,
+                session_id = %build.id,
+                exit_status = Empty,
+                otel.kind = "server",
+                otel.status_code = Empty,
+                otel.status_description = Empty,
+            );
+            if let Some(parent) = client.trace_context() {
+                parent.make_parent_of(&span);
+            }
+            proxy
+                .handle_channel(build, guard, client, conn_token)
+                .instrument(span)
+                .await;
+        });
         Ok(())
     }
 

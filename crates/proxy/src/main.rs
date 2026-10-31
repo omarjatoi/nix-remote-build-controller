@@ -6,14 +6,17 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use clap::{Parser, Subcommand};
-use tracing::info;
 use tracing::level_filters::LevelFilter;
+use tracing::{error, info};
 
-use common::{duration, error, logging, shutdown};
-use proxy::SshProxy;
+use common::{Telemetry, duration, error, logging, shutdown};
+use proxy::{Metrics, SshProxy};
 
 /// The version reported by `proxy version`.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// How this program is named in exported telemetry.
+const SERVICE_NAME: &str = "nix-remote-build-proxy";
 
 /// SSH proxy for Nix remote builders.
 ///
@@ -32,6 +35,10 @@ struct Cli {
     /// Health check server port
     #[arg(long, default_value_t = 8080)]
     health_port: u16,
+
+    /// Address for the Prometheus metrics endpoint ("0" disables it)
+    #[arg(long, default_value = "0")]
+    metrics_addr: String,
 
     /// Path to the proxy's SSH host private key (default: 'host-key' entry of
     /// the SSH key secret, else an ephemeral key)
@@ -142,16 +149,26 @@ fn optional_path(s: &str) -> Option<PathBuf> {
 }
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
-    logging::init(cli.log_level);
+    let telemetry = Telemetry::try_new(SERVICE_NAME, VERSION, cli.log_level)?;
+    let result = serve(cli, &telemetry).await;
+    if let Err(err) = &result {
+        error!(error = %error::chain(err), "SSH proxy failed");
+    }
+    telemetry.shutdown().await;
+    result
+}
 
+async fn serve(cli: Cli, telemetry: &Telemetry) -> anyhow::Result<()> {
     let shutdown = shutdown::token();
+    let metrics_server = telemetry.metrics().serve(&cli.metrics_addr).await?;
     let host_key = optional_path(&cli.host_key);
     let client_keys = optional_path(&cli.client_authorized_keys);
-    let ssh_proxy = SshProxy::from_cluster(
+    let ssh_proxy = SshProxy::try_new_from_cluster(
         config(&cli),
         host_key.as_deref(),
         &cli.ssh_key_secret,
         client_keys.as_deref(),
+        Metrics::new(&telemetry.metrics().meter()),
     )
     .await
     .context("create SSH proxy")?;
@@ -161,7 +178,11 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         port = cli.port,
         "Starting Nix remote builder SSH proxy"
     );
-    ssh_proxy.run(shutdown).await.context("SSH proxy failed")?;
+    let result = ssh_proxy.run(shutdown).await.context("SSH proxy failed");
+    if let Some(server) = metrics_server {
+        server.shutdown().await;
+    }
+    result?;
     info!("SSH proxy stopped");
     Ok(())
 }

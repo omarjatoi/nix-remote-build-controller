@@ -33,6 +33,7 @@ pub fn is_invalid(err: &kube::Error) -> bool {
 /// Builds an API error, as the API server would return it. Used by the
 /// in-memory fake API in tests.
 #[cfg(any(test, feature = "testing"))]
+#[must_use]
 pub fn new(code: u16, reason: &str, message: &str) -> kube::Error {
     kube::Error::Api(
         kube::core::Status::failure(message, reason)

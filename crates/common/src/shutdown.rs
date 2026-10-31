@@ -5,6 +5,7 @@ use tracing::{error, info};
 
 /// A token that is cancelled when SIGINT or SIGTERM is received. Must be
 /// called from within a Tokio runtime.
+#[must_use]
 pub fn token() -> CancellationToken {
     let token = CancellationToken::new();
     let cancel = token.clone();

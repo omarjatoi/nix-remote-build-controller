@@ -25,7 +25,7 @@ metadata:
 spec:
   replicas: 1
   # One proxy pod at a time. To run more replicas, see "High availability" in
-  # the README.
+  # docs/deployment.md.
   strategy:
     type: Recreate
   selector:
@@ -35,6 +35,10 @@ spec:
     metadata:
       labels:
         component: proxy
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8082"
+        prometheus.io/path: /metrics
     spec:
       serviceAccountName: nix-remote-build-controller
       # Lets running builds finish when the pod stops. Keep this longer than
@@ -52,6 +56,7 @@ spec:
           args:
             - --port=2222
             - --health-port=8080
+            - --metrics-addr=:8082
             - --namespace=default
             - --remote-user=nixbld
             - --remote-port=22
@@ -77,6 +82,8 @@ spec:
               name: ssh
             - containerPort: 8080
               name: health
+            - containerPort: 8082
+              name: metrics
           livenessProbe:
             httpGet:
               path: /healthz

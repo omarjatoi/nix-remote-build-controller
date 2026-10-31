@@ -25,8 +25,16 @@ getrandom = "0.4.3"
 http = "1.5.0"
 k8s-openapi = { version = "0.28", features = ["latest"] }
 kube = { version = "4.2.0", default-features = false, features = ["client", "rustls-tls", "ring", "runtime", "derive"] }
+opentelemetry = { version = "0.33.1", default-features = false, features = ["logs", "metrics", "trace"] }
+opentelemetry-appender-tracing = "0.33.1"
+opentelemetry-otlp = { version = "0.33.1", default-features = false, features = ["gzip-http", "http-json", "http-proto", "logs", "metrics", "reqwest-blocking-client", "trace"] }
+opentelemetry-prometheus = "0.33.1"
+opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["logs", "metrics", "trace"] }
 prometheus = { version = "0.14.0", default-features = false }
+# OTLP over HTTPS, with the same crypto provider as the Kubernetes client.
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider"] }
 russh = { version = "0.65.0", default-features = false, features = ["ring", "rsa", "flate2"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 socket2 = { version = "0.6.5", features = ["all"] }
@@ -35,6 +43,7 @@ tokio = { version = "1.54.1", features = ["full"] }
 tokio-util = { version = "0.7.20", features = ["rt"] }
 tower = { version = "0.5.3", features = ["util"] }
 tracing = "0.1.44"
+tracing-opentelemetry = { version = "0.34.0", default-features = false }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "json"] }
 uuid = { version = "1.29.0", features = ["v7"] }
 

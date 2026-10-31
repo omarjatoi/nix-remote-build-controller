@@ -45,16 +45,19 @@ impl ClientAuthorizer {
     }
 
     /// The number of authorized keys.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.keys.len()
     }
 
     /// Whether the list is empty (never true for a parsed list).
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.keys.is_empty()
     }
 
     /// Whether `key` is in the list.
+    #[must_use]
     pub fn is_authorized(&self, key: &PublicKey) -> bool {
         wire_bytes(key).is_ok_and(|bytes| self.keys.contains_key(&bytes))
     }
@@ -100,6 +103,7 @@ fn wire_bytes(key: &PublicKey) -> anyhow::Result<Vec<u8>> {
 }
 
 /// The OpenSSH SHA256 fingerprint of `key`, e.g. `SHA256:abc...`.
+#[must_use]
 pub fn fingerprint(key: &PublicKey) -> String {
     key.fingerprint(HashAlg::Sha256).to_string()
 }
