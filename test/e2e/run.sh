@@ -14,15 +14,31 @@
 # the proxy, the controller and Nix on the builder pods all end up in one trace,
 # with both ssh:// and ssh-ng:// builders. It needs Determinate Nix on the client.
 #
-# Requires on PATH: kind, kubectl, docker, nix, jq, ssh, ssh-keygen, perl.
+# HELM=1 deploys with the Helm chart, in a namespace of its own, instead of with
+# kustomize. It works with HA=1, but not with OTEL=1.
+#
+# Requires on PATH: kind, kubectl, docker, nix, jq, ssh, ssh-keygen, perl, and
+# helm for HELM=1.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CLUSTER="nix-remote-build-e2e"
-NS="default"
 KEEP="${KEEP:-0}"
 HA="${HA:-0}"
 OTEL="${OTEL:-0}"
+HELM="${HELM:-0}"
+if [ "$HELM" = "1" ]; then
+  NS="nix-builds"
+  RELEASE="nix-remote-build-controller"
+  CONTROLLER="${RELEASE}-controller"
+  PROXY="${RELEASE}-proxy"
+  COMPONENT_LABEL="app.kubernetes.io/component"
+else
+  NS="default"
+  CONTROLLER="controller"
+  PROXY="proxy"
+  COMPONENT_LABEL="component"
+fi
 LEASE="nix-remote-build-controller.nix.io"
 SLEEP_SECONDS="${SLEEP_SECONDS:-30}"
 PROXY_PORT="${PROXY_LOCAL_PORT:-2222}"
@@ -57,6 +73,7 @@ trap cleanup EXIT
 for t in kind kubectl docker nix jq ssh ssh-keygen; do
   command -v "$t" >/dev/null 2>&1 || fail "missing required tool: $t"
 done
+[ "$HELM" = "1" ] && { command -v helm >/dev/null 2>&1 || fail "missing required tool: helm"; }
 
 # Nix ignores a client-specified `builders` setting for untrusted users. Rather
 # than edit /etc/nix and restart the daemon, build into a private chroot store:
@@ -64,6 +81,7 @@ done
 # no symlink ancestors, so `pwd -P` resolves macOS's /var and /tmp symlinks.
 STORE="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/nrbc-store.XXXXXX")" && pwd -P)"
 [ "$HA" = "1" ] && [ "$OTEL" = "1" ] && fail "HA=1 and OTEL=1 cannot be combined"
+[ "$HELM" = "1" ] && [ "$OTEL" = "1" ] && fail "HELM=1 and OTEL=1 cannot be combined"
 
 [ "$(nix store info --store "$STORE" --json 2>/dev/null | jq -r '.trusted // false')" = "true" ] ||
   fail "not trusted even in a private store; cannot honor --builders"
@@ -99,7 +117,7 @@ with_timeout() { local secs="$1"; shift; perl -e 'alarm shift; exec @ARGV' "$sec
 pod_metrics() { kubectl get --raw "/api/v1/namespaces/${NS}/pods/${1}:8082/proxy/metrics"; }
 # Name of the first pod of a component. Args: <component>
 pod_of() {
-  kubectl -n "$NS" get pods -l "component=$1" \
+  kubectl -n "$NS" get pods -l "${COMPONENT_LABEL}=$1" \
     -o jsonpath='{.items[?(@.status.phase=="Running")].metadata.name}' | cut -d' ' -f1
 }
 # Fail unless a metric of a pod has a sample above zero. Args: <pod> <metric regex>
@@ -171,6 +189,7 @@ log "3/8 Creating SSH keys and secret"
 for k in nixbld client builder-host; do
   ssh-keygen -t ed25519 -f "${WORK}/${k}" -N "" -C "$k" -q
 done
+kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 kubectl create secret generic nix-builder-ssh-keys -n "$NS" \
   --from-file=private="${WORK}/nixbld" \
   --from-file=public="${WORK}/nixbld.pub" \
@@ -179,9 +198,17 @@ kubectl create secret generic nix-builder-ssh-keys -n "$NS" \
   --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
 log "4/8 Deploying controller and proxy"
-kubectl apply -k "$MANIFESTS" >/dev/null
-kubectl -n "$NS" rollout status deploy/controller --timeout=120s
-kubectl -n "$NS" rollout status deploy/proxy --timeout=120s
+if [ "$HELM" = "1" ]; then
+  REPLICAS=1
+  [ "$HA" = "1" ] && REPLICAS=2
+  helm install "$RELEASE" "${REPO_ROOT}/charts/nix-remote-build-controller" -n "$NS" \
+    --values "${REPO_ROOT}/test/e2e/helm-values.yaml" \
+    --set "controller.replicaCount=${REPLICAS}" >/dev/null
+else
+  kubectl apply -k "$MANIFESTS" >/dev/null
+fi
+kubectl -n "$NS" rollout status "deploy/${CONTROLLER}" --timeout=120s
+kubectl -n "$NS" rollout status "deploy/${PROXY}" --timeout=120s
 if [ "$OTEL" = "1" ]; then
   kubectl -n "$NS" rollout status deploy/otel-collector --timeout=180s
   kubectl -n "$NS" port-forward svc/otel-collector 4318:4318 >/dev/null 2>&1 &
@@ -205,7 +232,7 @@ if [ "$HA" = "1" ]; then
 fi
 
 log "5/8 Port-forwarding proxy to localhost:${PROXY_PORT}"
-kubectl -n "$NS" port-forward svc/proxy "${PROXY_PORT}:22" >/dev/null 2>&1 &
+kubectl -n "$NS" port-forward "svc/${PROXY}" "${PROXY_PORT}:22" >/dev/null 2>&1 &
 PF_PID=$!
 for i in $(seq 1 30); do
   (exec 3<>"/dev/tcp/127.0.0.1/${PROXY_PORT}") 2>/dev/null && { exec 3>&- 3<&-; break; }
