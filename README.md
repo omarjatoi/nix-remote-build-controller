@@ -317,6 +317,11 @@ The proxy and controller send logs, traces and metrics over OTLP when
 | `OTEL_METRIC_EXPORT_INTERVAL` | Milliseconds between metric exports |
 | `OTEL_SDK_DISABLED` | `true` turns all OTLP export off |
 
+A problem with OTLP export never stops the proxy or the controller: if a signal
+cannot be exported, they log an error and run without it. The exporter needs a CA
+bundle, even for `http://` endpoints. The images have one; elsewhere, set
+`SSL_CERT_FILE` if the system has none.
+
 Builder pods do not see these variables, because `sshd` does not pass them on.
 Nix there reads its settings from `otlp.conf` next to `nix.conf`, which the
 component adds to `deploy/nix-config.yaml`:

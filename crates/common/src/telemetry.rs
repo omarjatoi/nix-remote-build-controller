@@ -13,14 +13,14 @@ use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::logs::SdkLoggerProvider;
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use tracing::level_filters::LevelFilter;
-use tracing::{Span, Subscriber, info, warn};
+use tracing::{Span, Subscriber, error, info, warn};
 use tracing_subscriber::filter::{self, Targets};
 use tracing_subscriber::layer::{Context, Filter};
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::{EnvFilter, Layer};
 
-use crate::logging;
 use crate::metrics_provider::MetricsProvider;
+use crate::{error, logging};
 
 /// Target of spans that only go to the trace exporter. Log lines show the
 /// fields of the innermost span they are logged in, so a span that divides up
@@ -100,8 +100,10 @@ impl Telemetry {
     /// at `level` (see [`logging`]), and starts the pipelines. `service` names
     /// this program in the exported data unless `OTEL_SERVICE_NAME` does.
     ///
-    /// Fails if the OTLP settings are invalid. A collector that cannot be
-    /// reached later on only loses telemetry.
+    /// Problems with OTLP export never stop the program: a signal that cannot
+    /// be exported is logged and turned off, and a collector that cannot be
+    /// reached only loses telemetry. This fails only if the Prometheus exporter
+    /// cannot be created.
     pub fn try_new(service: &str, version: &str, level: LevelFilter) -> anyhow::Result<Self> {
         let otlp = OtlpSignals::new(|name| std::env::var(name).ok());
         if otlp != OtlpSignals::default() {
@@ -110,22 +112,18 @@ impl Telemetry {
         }
         let resource = resource(service, version);
 
-        let tracer_provider = if otlp.traces {
-            Some(tracer_provider(resource.clone())?)
-        } else {
-            None
-        };
-        let logger_provider = if otlp.logs {
-            Some(logger_provider(resource.clone())?)
-        } else {
-            None
-        };
-        let metric_exporter = if otlp.metrics {
-            let exporter = MetricExporter::builder().build();
-            Some(exporter.context("create OTLP metric exporter")?)
-        } else {
-            None
-        };
+        let mut failures = Vec::new();
+        let tracer_provider = export_pipeline(otlp.traces, "traces", &mut failures, || {
+            tracer_provider(resource.clone())
+        });
+        let logger_provider = export_pipeline(otlp.logs, "logs", &mut failures, || {
+            logger_provider(resource.clone())
+        });
+        let metric_exporter = export_pipeline(otlp.metrics, "metrics", &mut failures, || {
+            MetricExporter::builder()
+                .build()
+                .map_err(anyhow::Error::from)
+        });
         let metrics = MetricsProvider::try_new_with_otlp(resource, metric_exporter)?;
 
         let trace_layer = tracer_provider.as_ref().map(|provider| {
@@ -147,11 +145,19 @@ impl Telemetry {
             .try_init();
 
         info!(
-            traces = otlp.traces,
+            traces = tracer_provider.is_some(),
             metrics = otlp.metrics,
-            logs = otlp.logs,
+            logs = logger_provider.is_some(),
             "OTLP export configured"
         );
+        for failure in failures {
+            error!(
+                error = %failure,
+                "OTLP export is off for this signal. Check the OTEL_* settings. The exporter \
+                 needs a CA bundle even for http:// endpoints: set SSL_CERT_FILE if the system \
+                 has none."
+            );
+        }
         Ok(Self {
             metrics,
             tracer_provider,
@@ -183,6 +189,26 @@ impl Telemetry {
         });
         if let Err(err) = stopped.await {
             warn!(error = %err, "Failed to shut down telemetry");
+        }
+    }
+}
+
+/// Builds the export pipeline of a signal if it is `enabled`. A failure is added
+/// to `failures`, because the logger may not be installed yet.
+fn export_pipeline<T>(
+    enabled: bool,
+    signal: &str,
+    failures: &mut Vec<String>,
+    build: impl FnOnce() -> anyhow::Result<T>,
+) -> Option<T> {
+    if !enabled {
+        return None;
+    }
+    match build() {
+        Ok(pipeline) => Some(pipeline),
+        Err(err) => {
+            failures.push(format!("{signal}: {}", error::chain(&err)));
+            None
         }
     }
 }

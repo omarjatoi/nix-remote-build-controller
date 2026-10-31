@@ -227,7 +227,11 @@
         checks = {
           fmt = cargoCheck "fmt" "cargo fmt --check";
           clippy = cargoCheck "clippy" "cargo clippy --all-targets --locked --offline -- -D warnings";
-          tests = cargoCheck "tests" "cargo test --locked --offline";
+          # The OTLP exporter needs a CA bundle, which the images have too.
+          tests = cargoCheck "tests" ''
+            export SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt
+            cargo test --locked --offline
+          '';
         };
 
         devShells.default = pkgs.mkShell {

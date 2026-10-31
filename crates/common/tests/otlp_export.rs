@@ -12,8 +12,17 @@ use tracing::level_filters::LevelFilter;
 
 use common::{TRACE_ONLY_TARGET, Telemetry};
 
-/// The name of the test that exports, for running it on its own.
-const EXPORTING_TEST: &str = "export_telemetry";
+/// Runs an ignored test of this binary in a process of its own, because the
+/// settings are environment variables and the logger is global.
+fn run_with_endpoint(test: &str, endpoint: &str) {
+    let test_binary = std::env::current_exe().expect("path of this test binary");
+    let status = Command::new(test_binary)
+        .args(["--exact", test, "--ignored"])
+        .env("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint)
+        .status()
+        .expect("run the test");
+    assert!(status.success(), "{test} failed: {status}");
+}
 
 #[test]
 fn telemetry_reaches_the_collector_on_shutdown() {
@@ -31,15 +40,7 @@ fn telemetry_reaches_the_collector_on_shutdown() {
     }));
     runtime.spawn(async move { axum::serve(listener, receiver).await });
 
-    // The settings are environment variables and the logger is global, so the
-    // export gets a process of its own.
-    let test_binary = std::env::current_exe().expect("path of this test binary");
-    let exported = Command::new(test_binary)
-        .args(["--exact", EXPORTING_TEST, "--ignored"])
-        .env("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint)
-        .status()
-        .expect("run the exporting test");
-    assert!(exported.success(), "{EXPORTING_TEST} failed: {exported}");
+    run_with_endpoint("export_telemetry", &endpoint);
 
     let mut paths = paths.lock().unwrap().clone();
     paths.sort();
@@ -66,5 +67,29 @@ async fn export_telemetry() {
             tracing::info!("Exported");
         });
     });
+    telemetry.shutdown().await;
+}
+
+#[test]
+fn programs_run_without_export_when_it_cannot_be_set_up() {
+    run_with_endpoint("run_with_a_broken_exporter", "http://[not-a-valid-url");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "run by programs_run_without_export_when_it_cannot_be_set_up, which sets up its environment"]
+async fn run_with_a_broken_exporter() {
+    let telemetry = Telemetry::try_new("test", "1.2.3", LevelFilter::INFO)
+        .expect("broken OTLP settings must not stop the program");
+    let metrics = telemetry.metrics();
+    metrics
+        .meter()
+        .u64_counter("test.requests")
+        .build()
+        .add(1, &[]);
+    assert!(
+        metrics.render().contains("test_requests_total 1"),
+        "Prometheus metrics work without OTLP: {}",
+        metrics.render()
+    );
     telemetry.shutdown().await;
 }
