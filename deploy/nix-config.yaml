@@ -17,3 +17,5 @@ data:
     # Download cached dependencies in the pod, not through the client.
     substituters = https://cache.nixos.org
     builders-use-substitutes = true
+    # OpenTelemetry settings, if any (see deploy/components/otel).
+    !include otlp.conf

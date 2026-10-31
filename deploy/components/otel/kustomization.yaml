@@ -1,0 +1,22 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+# OpenTelemetry for the whole deployment: an in-cluster collector, and the
+# controller, proxy and builder pods sending it their telemetry. Add this to an
+# overlay with `components:`, and replace the collector's `debug` exporter with
+# your backend.
+resources:
+  - otel-collector.yaml
+
+patches:
+  - path: telemetry-env.yaml
+    target:
+      kind: Deployment
+      name: controller
+  - path: telemetry-env.yaml
+    target:
+      kind: Deployment
+      name: proxy
+  # Environment variables do not reach Nix through sshd, so builder pods are
+  # configured in nix.conf.
+  - path: builder-otlp.yaml

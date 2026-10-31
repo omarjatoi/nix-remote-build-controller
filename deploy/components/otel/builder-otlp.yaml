@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nix-builder-config
+  namespace: default
+data:
+  # Included by nix.conf. Determinate Nix sends OTLP in the http/json format.
+  otlp.conf: |
+    otlp = true
+    otlp-endpoint = http://otel-collector:4318

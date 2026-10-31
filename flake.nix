@@ -87,6 +87,8 @@
             };
             config = {
               Entrypoint = [ "${app}/bin/${name}" ];
+              # For exporting telemetry to an HTTPS endpoint.
+              Env = [ "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt" ];
             };
           };
       in
@@ -160,7 +162,7 @@
             PubkeyAuthentication yes
             PermitRootLogin no
             AllowUsers nixbld
-            AcceptEnv PATH
+            AcceptEnv PATH TRACEPARENT
             ClientAliveInterval 30
             ClientAliveCountMax 4
             StrictModes no
