@@ -257,6 +257,13 @@ export NIX_SSHOPTS="-F ${WORK}/ssh_config"
 ssh -F "${WORK}/ssh_config" nrbc-proxy "nix-store --version" >/dev/null 2>&1 ||
   fail "could not run nix-store on a builder pod through the proxy"
 
+# Builder pods must reach HTTPS substituters themselves. Builds still pass if
+# they cannot, because the client then uploads the dependencies, so check it
+# directly.
+ssh -F "${WORK}/ssh_config" nrbc-proxy "nix store info --store https://cache.nixos.org" >/dev/null 2>&1 ||
+  fail "a builder pod could not reach https://cache.nixos.org"
+info "PASS: builder pods can reach HTTPS substituters"
+
 # Flow control: the builder writes a large stdout before reading any stdin while
 # the client streams a large stdin. Both directions must keep moving; a proxy
 # that lets one stalled direction block the other deadlocks here.

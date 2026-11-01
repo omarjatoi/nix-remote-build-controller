@@ -187,6 +187,11 @@
             echo "sshd:x:999:" >> $out/etc/group
             echo "nixbld:x:1000:" >> $out/etc/group
             mkdir -p $out/home/nixbld/.ssh $out/tmp $out/var/empty
+            # Where Nix looks for CA certificates when NIX_SSL_CERT_FILE is
+            # unset, as it is in SSH sessions: sshd does not pass on the image's
+            # environment.
+            mkdir -p $out/etc/ssl/certs
+            ln -s ${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt $out/etc/ssl/certs/ca-certificates.crt
           '';
 
           builder-image = pkgs.dockerTools.buildImage {
@@ -215,10 +220,7 @@
             };
             config = {
               Entrypoint = [ "${self.packages.${system}.builder-entrypoint}/bin/entrypoint" ];
-              Env = [
-                "PATH=/bin"
-                "NIX_SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
-              ];
+              Env = [ "PATH=/bin" ];
               ExposedPorts = {
                 "22/tcp" = { };
               };
