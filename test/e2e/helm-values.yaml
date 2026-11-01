@@ -1,0 +1,32 @@
+# Values for the end-to-end test (HELM=1). The images are loaded into Kind, so
+# pods must not pull them. The test reaches the proxy with a port-forward.
+builder:
+  image:
+    tag: e2e
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 2
+      memory: 2Gi
+
+controller:
+  image:
+    tag: e2e
+    pullPolicy: IfNotPresent
+  completedTtl: 2m
+  logLevel: debug
+
+proxy:
+  image:
+    tag: e2e
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+  podReadyTimeout: 3m
+  buildTimeout: 20m
+  shutdownTimeoutSeconds: 120
+  keepaliveInterval: 15s
+  logLevel: debug

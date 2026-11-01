@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "nrbc.nixConfigName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nrbc.labels" (dict "context" .) | nindent 4 }}
+data:
+  nix.conf: |
+    {{- .Values.builder.nixConf | trim | nindent 4 }}
+    {{- if .Values.telemetry.otlpEndpoint }}
+    !include otlp.conf
+    {{- end }}
+  {{- with .Values.telemetry.otlpEndpoint }}
+  # Environment variables do not reach Nix through sshd. Determinate Nix sends
+  # OTLP in the http/json format.
+  otlp.conf: |
+    otlp = true
+    otlp-endpoint = {{ . }}
+  {{- end }}

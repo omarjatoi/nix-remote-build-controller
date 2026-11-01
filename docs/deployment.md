@@ -1,7 +1,9 @@
 # Deployment
 
 How to deploy the controller and proxy and connect a Nix client, and how to
-secure and scale the deployment.
+secure and scale the deployment. This page uses the kustomize manifests in
+`deploy/`. To install with Helm, see [Helm](helm.md), and then continue from
+[Configure the client](#4-configure-the-client).
 
 ## Quick start
 

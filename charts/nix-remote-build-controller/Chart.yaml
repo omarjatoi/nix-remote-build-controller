@@ -1,0 +1,15 @@
+apiVersion: v2
+name: nix-remote-build-controller
+description: Run Nix remote builds on Kubernetes, with one short-lived builder pod per build
+type: application
+version: 0.1.0
+# The default image tag. CI publishes only `latest`, so an image tag such as
+# 0.1.0 would not exist.
+appVersion: "latest"
+home: https://github.com/omarjatoi/nix-remote-build-controller
+sources:
+  - https://github.com/omarjatoi/nix-remote-build-controller
+keywords:
+  - nix
+  - remote-builds
+  - controller

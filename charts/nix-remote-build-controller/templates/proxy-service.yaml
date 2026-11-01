@@ -1,0 +1,36 @@
+{{- $component := dict "context" . "component" "proxy" -}}
+{{- $service := .Values.proxy.service -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "nrbc.fullname" . }}-proxy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nrbc.labels" $component | nindent 4 }}
+  {{- with $service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ $service.type }}
+  {{- if ne $service.type "ClusterIP" }}
+  {{- with $service.externalTrafficPolicy }}
+  externalTrafficPolicy: {{ . }}
+  {{- end }}
+  {{- end }}
+  {{- if eq $service.type "LoadBalancer" }}
+  {{- with $service.loadBalancerSourceRanges }}
+  loadBalancerSourceRanges:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- end }}
+  ports:
+    - port: {{ $service.port }}
+      targetPort: ssh
+      protocol: TCP
+      name: ssh
+      {{- if and $service.nodePort (ne $service.type "ClusterIP") }}
+      nodePort: {{ $service.nodePort }}
+      {{- end }}
+  selector:
+    {{- include "nrbc.selectorLabels" $component | nindent 4 }}
